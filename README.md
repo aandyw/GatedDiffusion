@@ -1,1 +1,1 @@
-# stable-diffusion-research
+# magicbrush-research

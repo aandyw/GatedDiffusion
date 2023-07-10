@@ -16,6 +16,7 @@
 
 """Script to fine-tune InstructPix2Pix."""
 
+import logging
 import argparse
 import logging
 import math
@@ -46,10 +47,14 @@ from packaging import version
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-import pytorch_lightning as pl
 
 from modules.mask import Mask
+from modules.model import Model
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # DATASET_NAME_MAPPING = {
 #     "osunlp/MagicBrush": (
@@ -67,130 +72,199 @@ original_image_column = "source_img"
 edit_prompt_column = "instruction"
 edited_image_column = "target_img"
 weight_dtype = torch.float16  # mixed precision
-learning_rate = 1e6
 resolution = 512
 batch_size = 32
 device = "cuda"
 
-# Load data
-dataset = datasets.load_dataset(dataset_name, cache_dir="data")
 
+def main():
+    # Load data
+    dataset = datasets.load_dataset(dataset_name, cache_dir="data")
 
-### Preprocessing data ###
-def tokenize_captions(captions):
-    inputs = tokenizer(
-        captions,
-        max_length=tokenizer.model_max_length,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
+    ### Preprocessing data ###
+    def tokenize_captions(captions):
+        inputs = tokenizer(
+            captions,
+            max_length=tokenizer.model_max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        return inputs.input_ids
+
+    train_transforms = transforms.Compose(
+        [
+            transforms.CenterCrop(resolution),
+            transforms.Lambda(lambda x: x),
+        ]
     )
-    return inputs.input_ids
 
+    def convert_to_np(image, resolution):
+        image = image.convert("RGB").resize((resolution, resolution))
+        return np.array(image).transpose(2, 0, 1)
 
-train_transforms = transforms.Compose(
-    [
-        transforms.CenterCrop(resolution),
-        transforms.Lambda(lambda x: x),
-    ]
-)
+    def preprocess_images(samples):
+        original_images = np.concatenate(
+            [
+                convert_to_np(image, resolution)
+                for image in samples[original_image_column]
+            ]
+        )
+        edited_images = np.concatenate(
+            [convert_to_np(image, resolution) for image in samples[edited_image_column]]
+        )
+        # We need to ensure that the original and the edited images undergo the same
+        # augmentation transforms.
+        images = np.concatenate([original_images, edited_images])
+        images = torch.tensor(images)
+        images = 2 * (images / 255) - 1
+        return train_transforms(images)
 
+    def preprocess_train(samples):
+        # Preprocess images.
+        preprocessed_images = preprocess_images(samples)
+        # Since the original and edited images were concatenated before
+        # applying the transformations, we need to separate them and reshape
+        # them accordingly.
+        original_images, edited_images = preprocessed_images.chunk(2)
+        original_images = original_images.reshape(-1, 3, resolution, resolution)
+        edited_images = edited_images.reshape(-1, 3, resolution, resolution)
 
-def convert_to_np(image, resolution):
-    image = image.convert("RGB").resize((resolution, resolution))
-    return np.array(image).transpose(2, 0, 1)
+        # Collate the preprocessed images into the `examples`.
+        samples["original_pixel_values"] = original_images
+        samples["edited_pixel_values"] = edited_images
 
+        # Preprocess the captions.
+        captions = [caption for caption in samples[edit_prompt_column]]
+        samples["input_ids"] = tokenize_captions(captions)
+        return samples
 
-def preprocess_images(samples):
-    original_images = np.concatenate(
-        [convert_to_np(image, resolution) for image in samples[original_image_column]]
+    def collate_fn(examples):
+        original_pixel_values = torch.stack(
+            [example["original_pixel_values"] for example in examples]
+        )
+        original_pixel_values = original_pixel_values.to(
+            memory_format=torch.contiguous_format
+        ).float()
+        edited_pixel_values = torch.stack(
+            [example["edited_pixel_values"] for example in examples]
+        )
+        edited_pixel_values = edited_pixel_values.to(
+            memory_format=torch.contiguous_format
+        ).float()
+        input_ids = torch.stack([example["input_ids"] for example in examples])
+        return {
+            "original_pixel_values": original_pixel_values,
+            "edited_pixel_values": edited_pixel_values,
+            "input_ids": input_ids,
+        }
+
+    train_dataset = dataset["train"].with_transform(preprocess_train)
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=batch_size
     )
-    edited_images = np.concatenate(
-        [convert_to_np(image, resolution) for image in samples[edited_image_column]]
+
+    # Load scheduler, tokenizer and models.
+    noise_scheduler = DDPMScheduler.from_pretrained(
+        pretrained_model_id, subfolder="scheduler"
     )
-    # We need to ensure that the original and the edited images undergo the same
-    # augmentation transforms.
-    images = np.concatenate([original_images, edited_images])
-    images = torch.tensor(images)
-    images = 2 * (images / 255) - 1
-    return train_transforms(images)
-
-
-def preprocess_train(samples):
-    # Preprocess images.
-    preprocessed_images = preprocess_images(samples)
-    # Since the original and edited images were concatenated before
-    # applying the transformations, we need to separate them and reshape
-    # them accordingly.
-    original_images, edited_images = preprocessed_images.chunk(2)
-    original_images = original_images.reshape(-1, 3, resolution, resolution)
-    edited_images = edited_images.reshape(-1, 3, resolution, resolution)
-
-    # Collate the preprocessed images into the `examples`.
-    samples["original_pixel_values"] = original_images
-    samples["edited_pixel_values"] = edited_images
-
-    # Preprocess the captions.
-    captions = [caption for caption in samples[edit_prompt_column]]
-    samples["input_ids"] = tokenize_captions(captions)
-    return samples
-
-
-def collate_fn(examples):
-    original_pixel_values = torch.stack(
-        [example["original_pixel_values"] for example in examples]
+    tokenizer = CLIPTokenizer.from_pretrained(
+        pretrained_model_id, subfolder="tokenizer"
     )
-    original_pixel_values = original_pixel_values.to(
-        memory_format=torch.contiguous_format
-    ).float()
-    edited_pixel_values = torch.stack(
-        [example["edited_pixel_values"] for example in examples]
+    text_encoder = CLIPTextModel.from_pretrained(
+        pretrained_model_id, subfolder="text_encoder"
     )
-    edited_pixel_values = edited_pixel_values.to(
-        memory_format=torch.contiguous_format
-    ).float()
-    input_ids = torch.stack([example["input_ids"] for example in examples])
-    return {
-        "original_pixel_values": original_pixel_values,
-        "edited_pixel_values": edited_pixel_values,
-        "input_ids": input_ids,
-    }
+    vae = AutoencoderKL.from_pretrained(pretrained_model_id, subfolder="vae")
+
+    # Freeze vae and text_encoder
+    vae.requires_grad_(False)
+    text_encoder.requires_grad_(False)
+
+    pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+        pretrained_model_id,
+        torch_dtype=weight_dtype,
+    )
+    pipeline = pipeline.to(device)
+
+    # Initialize learnable mask
+    learnable_mask = Mask()
+
+    model = Model(pipeline, learnable_mask)
+
+    ### Training ###
+    num_epochs = 100
+    learning_rate = 1e-6
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+    logger.info("***** Running training *****")
+    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num epochs = {num_epochs}")
+    logger.info(f"  Batch size = {batch_size}")
+    global_step = 0
+
+    progress_bar = tqdm(
+        range(
+            global_step,
+        )
+    )
+    progress_bar.set_description("Steps")
+
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+        for step, batch in enumerate(train_dataloader):
+            optimizer.zero_grad()
+
+            latents = vae.encode(
+                batch["edited_pixel_values"].to(weight_dtype)
+            ).latent_dist.sample()
+            latents = latents * vae.config.scaling_factor
+
+            noise = torch.randn_like(latents)
+            bsz = latents.shape[0]
+            timesteps = torch.randint(
+                0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device
+            )
+            timesteps = timesteps.long()
+
+            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+
+            encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+
+            original_image_embeds = vae.encode(
+                batch["original_pixel_values"].to(weight_dtype)
+            ).latent_dist.mode()
+
+            concatenated_noisy_latents = torch.cat(
+                [noisy_latents, original_image_embeds], dim=1
+            )
+
+            if noise_scheduler.config.prediction_type == "epsilon":
+                target = noise
+            elif noise_scheduler.config.prediction_type == "v_prediction":
+                target = noise_scheduler.get_velocity(latents, noise, timesteps)
+            else:
+                raise ValueError(
+                    f"Unknown prediction type {noise_scheduler.config.prediction_type}"
+                )
+
+            # Predict noise residual and compute loss
+            model_pred = model(
+                concatenated_noisy_latents, timesteps, encoder_hidden_states
+            )
+            loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+            # Backpropagate
+            loss.backward()
+            optimizer.step()
+
+            # log losses
+            train_loss += loss.item()
+
+        avg_loss = train_loss / len(train_dataloader)
+        logger.info(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_loss}")
 
 
-train_dataset = dataset["train"].with_train(preprocess_train)
-train_dataloader = torch.utils.data.DataLoader(
-    train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=batch_size
-)
-
-# Load scheduler, tokenizer and models.
-noise_scheduler = DDPMScheduler.from_pretrained(
-    pretrained_model_id, subfolder="scheduler"
-)
-tokenizer = CLIPTokenizer.from_pretrained(pretrained_model_id, subfolder="tokenizer")
-text_encoder = CLIPTextModel.from_pretrained(
-    pretrained_model_id, subfolder="text_encoder"
-)
-vae = AutoencoderKL.from_pretrained(pretrained_model_id, subfolder="vae")
-unet = UNet2DConditionModel.from_pretrained(pretrained_model_id, subfolder="unet")
-
-# Freeze vae, text_encoder, and unet
-vae.requires_grad_(False)
-text_encoder.requires_grad_(False)
-unet.requires_grad_(False)
-
-instruct_p2p = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-    pretrained_model_id,
-    unet=unet,
-    torch_dtype=weight_dtype,
-)
-instruct_p2p = instruct_p2p.to(device)
-
-# Initialize learnable mask
-learnable_mask = Mask(in_channels=3, out_channels=1)
-
-optimizer = torch.optim.AdamW(
-    learnable_mask.parameters(),
-    lr=learning_rate,
-)
-
-### Training ###
+if __name__ == "__main__":
+    main()

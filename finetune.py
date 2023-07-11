@@ -73,7 +73,7 @@ edit_prompt_column = "instruction"
 edited_image_column = "target_img"
 weight_dtype = torch.float32  # mixed precision with 16-bit
 resolution = 512
-batch_size = 4
+batch_size = 8
 device = "cuda"
 
 
@@ -205,6 +205,9 @@ def main():
     num_epochs = 100
     learning_rate = 1e-6
     gradient_accumulation_steps = 4
+    max_train_steps = num_epochs * math.ceil(
+        len(train_dataloader) / gradient_accumulation_steps
+    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -212,14 +215,12 @@ def main():
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num epochs = {num_epochs}")
     logger.info(f"  Batch size = {batch_size}")
+    logger.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
+    logger.info(f"  Total optimization steps = {max_train_steps}")
+
     global_step = 0
 
-    progress_bar = tqdm(
-        range(
-            global_step,
-            num_epochs * len(train_dataset),
-        )
-    )
+    progress_bar = tqdm(range(global_step, max_train_steps))
     progress_bar.set_description("Steps")
 
     for epoch in range(num_epochs):

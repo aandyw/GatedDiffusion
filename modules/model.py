@@ -1,15 +1,29 @@
+import torch
 import torch.nn as nn
 
 
 class Model(nn.Module):
-    def __init__(self, pipeline, mask):
+    def __init__(self, mask, unet):
         super().__init__()
-        self.pipeline = pipeline
         self.mask = mask
+        self.unet = unet
 
-    def forward(self, concatenated_noisy_latents, timesteps, encoder_hidden_states):
-        out = self.pipeline(
-            latents = concatenated_noisy_latents,
-            prompt_embeds = encoder_hidden_states
+    def forward(
+        self,
+        original_image_embeds,
+        concatenated_noisy_latents,
+        timesteps,
+        encoder_hidden_states,
+    ):
+        gated_unet_mask = self.mask(
+            concatenated_noisy_latents, timesteps, encoder_hidden_states
         )
-        return
+        generated_img = self.unet(
+            concatenated_noisy_latents, timesteps, encoder_hidden_states
+        )
+
+        out = torch.mul(gated_unet_mask, original_image_embeds) + torch.mul(
+            1 - gated_unet_mask, generated_img
+        )
+
+        return out

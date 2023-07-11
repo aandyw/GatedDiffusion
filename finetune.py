@@ -71,7 +71,7 @@ dataset_name = "osunlp/MagicBrush"
 original_image_column = "source_img"
 edit_prompt_column = "instruction"
 edited_image_column = "target_img"
-weight_dtype = torch.float16  # mixed precision
+weight_dtype = torch.float32  # mixed precision with 16-bit
 resolution = 512
 batch_size = 32
 device = "cuda"
@@ -175,21 +175,26 @@ def main():
         pretrained_model_id, subfolder="text_encoder"
     )
     vae = AutoencoderKL.from_pretrained(pretrained_model_id, subfolder="vae")
+    unet = UNet2DConditionModel.from_pretrained(pretrained_model_id, subfolder="unet")
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    unet.requires_grad_(False)
 
-    pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-        pretrained_model_id,
-        torch_dtype=weight_dtype,
-    )
-    pipeline = pipeline.to(device)
+    # pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+    #     pretrained_model_id,
+    #     torch_dtype=weight_dtype,
+    # )
+    # pipeline = pipeline.to(device)
+    vae = vae.to(device)
+    text_encoder = text_encoder.to(device)
+    unet = unet.to(device)
 
     # Initialize learnable mask
-    learnable_mask = Mask()
+    mask = Mask()
 
-    model = Model(pipeline, learnable_mask)
+    model = Model(mask, unet)
 
     ### Training ###
     num_epochs = 100
@@ -223,6 +228,8 @@ def main():
 
             noise = torch.randn_like(latents)
             bsz = latents.shape[0]
+
+            # Sample random timestep for each image
             timesteps = torch.randint(
                 0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device
             )
@@ -251,7 +258,10 @@ def main():
 
             # Predict noise residual and compute loss
             model_pred = model(
-                concatenated_noisy_latents, timesteps, encoder_hidden_states
+                original_image_embeds,
+                concatenated_noisy_latents,
+                timesteps,
+                encoder_hidden_states,
             )
             loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 

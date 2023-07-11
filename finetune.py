@@ -18,9 +18,9 @@
 
 import logging
 import argparse
-import logging
 import math
 import os
+import wandb
 from pathlib import Path
 from typing import Optional
 
@@ -73,7 +73,7 @@ edit_prompt_column = "instruction"
 edited_image_column = "target_img"
 weight_dtype = torch.float32  # mixed precision with 16-bit
 resolution = 512
-batch_size = 8
+batch_size = 4
 device = "cuda"
 
 
@@ -180,29 +180,22 @@ def main():
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    unet.requires_grad_(False)
 
-    # pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-    #     pretrained_model_id,
-    #     torch_dtype=weight_dtype,
-    # )
-    # pipeline = pipeline.to(device)
+    # Initialize learnable mask
+    mask = Mask(in_channels=4, out_channels=1)
+
+    # Combine model
+    model = Model(mask, unet)
+
+    # Load to device
     vae = vae.to(device)
     text_encoder = text_encoder.to(device)
     unet = unet.to(device)
-
-    # Initialize learnable mask
-    gated_unet_mask = UNet2DConditionModel.from_pretrained(
-        pretrained_model_id, subfolder="unet"
-    )
-    mask = Mask(gated_unet_mask)
     mask = mask.to(device)
-
-    # Create model
-    model = Model(mask, unet).to(device)
+    model = model.to(device)
 
     ### Training ###
-    num_epochs = 100
+    num_epochs = 10
     learning_rate = 1e-6
     gradient_accumulation_steps = 4
     max_train_steps = num_epochs * math.ceil(
@@ -275,7 +268,9 @@ def main():
                 timesteps,
                 encoder_hidden_states,
             )
-            loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+            # l2 loss
+            loss = F.mse_loss(model_pred.float(), target.float(), reduction="sum")
+
             # Backpropagate
             loss = loss / gradient_accumulation_steps
             loss.backward()

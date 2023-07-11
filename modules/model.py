@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 
+from diffusers import UNet2DConditionModel
 
-class Model(nn.Module):
+
+class Model(UNet2DConditionModel):
     def __init__(self, mask, unet):
         super().__init__()
         self.mask = mask
@@ -21,9 +23,7 @@ class Model(nn.Module):
         gated_unet_mask = self.mask(
             concatenated_noisy_latents, timesteps, encoder_hidden_states
         ).sample
-
-        out = torch.mul(gated_unet_mask, original_image_embeds) + torch.mul(
+        conv_out = torch.mul(gated_unet_mask, original_image_embeds) + torch.mul(
             1 - gated_unet_mask, generated_img
         )
-
-        return out
+        return conv_out

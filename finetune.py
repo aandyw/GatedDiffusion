@@ -73,7 +73,7 @@ edit_prompt_column = "instruction"
 edited_image_column = "target_img"
 weight_dtype = torch.float32  # mixed precision with 16-bit
 resolution = 512
-batch_size = 32
+batch_size = 4
 device = "cuda"
 
 
@@ -192,13 +192,19 @@ def main():
     unet = unet.to(device)
 
     # Initialize learnable mask
-    mask = Mask()
+    gated_unet_mask = UNet2DConditionModel.from_pretrained(
+        pretrained_model_id, subfolder="unet"
+    )
+    mask = Mask(gated_unet_mask)
+    mask = mask.to(device)
 
-    model = Model(mask, unet)
+    # Create model
+    model = Model(mask, unet).to(device)
 
     ### Training ###
     num_epochs = 100
     learning_rate = 1e-6
+    gradient_accumulation_steps = 4
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -211,6 +217,7 @@ def main():
     progress_bar = tqdm(
         range(
             global_step,
+            num_epochs * len(train_dataset),
         )
     )
     progress_bar.set_description("Steps")
@@ -219,6 +226,10 @@ def main():
         model.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+            batch["original_pixel_values"] = batch["original_pixel_values"].to(device)
+            batch["edited_pixel_values"] = batch["edited_pixel_values"].to(device)
+            batch["input_ids"] = batch["input_ids"].to(device)
+
             optimizer.zero_grad()
 
             latents = vae.encode(
@@ -264,13 +275,17 @@ def main():
                 encoder_hidden_states,
             )
             loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-
             # Backpropagate
+            loss = loss / gradient_accumulation_steps
             loss.backward()
-            optimizer.step()
+
+            if step % gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
 
             # log losses
             train_loss += loss.item()
+            progress_bar.update(1)
 
         avg_loss = train_loss / len(train_dataloader)
         logger.info(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_loss}")

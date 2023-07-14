@@ -9,6 +9,7 @@ class Model(UNet2DConditionModel):
         super().__init__()
         self.mask = mask
         self.unet = unet
+        self.conv_act = nn.Sigmoid()
 
     def forward(
         self,
@@ -20,10 +21,12 @@ class Model(UNet2DConditionModel):
         generated_img = self.unet(
             concatenated_noisy_latents, timesteps, encoder_hidden_states
         ).sample
-        gated_unet_mask = self.mask(
+        unet_mask = self.mask(
             concatenated_noisy_latents, timesteps, encoder_hidden_states
         ).sample
-        conv_out = torch.mul(gated_unet_mask, original_image_embeds) + torch.mul(
-            1 - gated_unet_mask, generated_img
+        act_mask = self.conv_act(unet_mask)
+
+        out = torch.mul(act_mask, original_image_embeds) + torch.mul(
+            1 - act_mask, generated_img
         )
-        return conv_out
+        return out

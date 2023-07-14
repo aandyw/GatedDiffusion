@@ -49,21 +49,13 @@ from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from modules.mask import Mask
-from modules.model import Model
+from model import Model
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# DATASET_NAME_MAPPING = {
-#     "osunlp/MagicBrush": (
-#         "source_img",
-#         "mask_img",
-#         "instruction",
-#         "target_img",
-#     ),
-# }
 WANDB_TABLE_COL_NAMES = ["source_img", "instruction", "target_img"]
 
 pretrained_model_id = "timbrooks/instruct-pix2pix"
@@ -75,6 +67,18 @@ weight_dtype = torch.float32  # mixed precision with 16-bit
 resolution = 512
 batch_size = 4
 device = "cuda"
+
+
+def convert_to_np(image, resolution):
+    image = image.convert("RGB").resize((resolution, resolution))
+    return np.array(image).transpose(2, 0, 1)
+
+
+def download_image(url):
+    image = PIL.Image.open(requests.get(url, stream=True).raw)
+    image = PIL.ImageOps.exif_transpose(image)
+    image = image.convert("RGB")
+    return image
 
 
 def main():
@@ -98,10 +102,6 @@ def main():
             transforms.Lambda(lambda x: x),
         ]
     )
-
-    def convert_to_np(image, resolution):
-        image = image.convert("RGB").resize((resolution, resolution))
-        return np.array(image).transpose(2, 0, 1)
 
     def preprocess_images(samples):
         original_images = np.concatenate(
@@ -177,6 +177,9 @@ def main():
     vae = AutoencoderKL.from_pretrained(pretrained_model_id, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(pretrained_model_id, subfolder="unet")
 
+    seed = 0
+    generator = torch.Generator(device=device).manual_seed(seed)
+
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -198,6 +201,13 @@ def main():
     num_epochs = 10
     learning_rate = 1e-6
     gradient_accumulation_steps = 4
+
+    # validation
+    validation_epochs = 1
+    num_validation_images = 4
+    validation_prompt = ""
+    val_image_url = "https://datasets-server.huggingface.co/assets/osunlp/MagicBrush/--/osunlp--MagicBrush/dev/0/source_img/image.jpg"
+
     max_train_steps = num_epochs * math.ceil(
         len(train_dataloader) / gradient_accumulation_steps
     )
@@ -285,6 +295,42 @@ def main():
 
         avg_loss = train_loss / len(train_dataloader)
         logger.info(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_loss}")
+
+        if epoch % validation_epochs == 0:
+            logger.info(
+                f"Running validation... \n Generating {num_validation_images} images with prompt:"
+                f" {validation_prompt}."
+            )
+            pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+                pretrained_model_id,
+                unet=model,
+                torch_dtype=weight_dtype,
+            )
+            pipeline = pipeline.to(device)
+            pipeline.set_progress_bar_config(disable=True)
+
+            original_image = download_image(val_image_url)
+            edited_images = []
+
+            for _ in range(num_validation_images):
+                edited_images.append(
+                    pipeline(
+                        validation_prompt,
+                        image=original_image,
+                        num_inference_steps=20,
+                        image_guidance_scale=1.5,
+                        guidance_scale=7,
+                        generator=generator,
+                    ).images[0]
+                )
+
+            wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
+            for edited_image in edited_images:
+                wandb_table.add_data(
+                    wandb.Image(original_image),
+                    wandb.Image(edited_image),
+                    validation_prompt,
+                )
 
 
 if __name__ == "__main__":

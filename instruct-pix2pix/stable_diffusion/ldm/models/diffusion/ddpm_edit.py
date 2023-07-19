@@ -48,6 +48,7 @@ class DDPM(pl.LightningModule):
     # classic DDPM with Gaussian diffusion, in image space
     def __init__(self,
                  unet_config,
+                 mask_unet_config,
                  timesteps=1000,
                  beta_schedule="linear",
                  loss_type="l2",
@@ -88,6 +89,7 @@ class DDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
+        self.mask_model = DiffusionWrapper(mask_unet_config, conditioning_key)
         count_params(self.model, verbose=True)
         self.use_ema = use_ema
 
@@ -104,6 +106,7 @@ class DDPM(pl.LightningModule):
 
         if self.use_ema and load_ema:
             self.model_ema = LitEma(self.model)
+            self.mask_model_ema = LitEma(self.mask_model)
             print(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
 
         if ckpt_path is not None:
@@ -112,6 +115,7 @@ class DDPM(pl.LightningModule):
             # If initialing from EMA-only checkpoint, create EMA model after loading.
             if self.use_ema and not load_ema:
                 self.model_ema = LitEma(self.model)
+                self.mask_model_ema = LitEma(self.mask_model)
                 print(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
 
         self.register_schedule(given_betas=given_betas, beta_schedule=beta_schedule, timesteps=timesteps,
@@ -184,6 +188,9 @@ class DDPM(pl.LightningModule):
         if self.use_ema:
             self.model_ema.store(self.model.parameters())
             self.model_ema.copy_to(self.model)
+
+            self.mask_model_ema.store(self.mask_model.parameters())
+            self.mask_model_ema.copy_to(self.mask_model)
             if context is not None:
                 print(f"{context}: Switched to EMA weights")
         try:
@@ -191,6 +198,7 @@ class DDPM(pl.LightningModule):
         finally:
             if self.use_ema:
                 self.model_ema.restore(self.model.parameters())
+                self.mask_model_ema.restore(self.mask_model.parameters())
                 if context is not None:
                     print(f"{context}: Restored training weights")
 
@@ -335,6 +343,8 @@ class DDPM(pl.LightningModule):
             target = x_start
         else:
             raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
+        
+        # TODO: implementation for loss here
 
         loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2, 3])
 

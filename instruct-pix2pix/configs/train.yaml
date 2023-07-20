@@ -95,12 +95,12 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 32
+    batch_size: 8
     num_workers: 2
     train:
       target: edit_dataset.EditDataset
       params:
-        path: data/clip-filtered-dataset
+        path: osunlp/MagicBrush
         split: train
         min_resize_res: 256
         max_resize_res: 256
@@ -109,8 +109,8 @@ data:
     validation:
       target: edit_dataset.EditDataset
       params:
-        path: data/clip-filtered-dataset
-        split: val
+        path: osunlp/MagicBrush
+        split: dev
         min_resize_res: 256
         max_resize_res: 256
         crop_res: 256

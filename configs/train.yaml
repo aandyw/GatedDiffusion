@@ -49,7 +49,7 @@ model:
         legacy: False
 
     mask_unet_config:
-      target: ldm.modules.diffusionmodules.mask_model.MaskUNetModel
+      target: ldm.modules.diffusionmodules.openaimodel.MaskUNetModel
       params:
         image_size: 32 # unused
         in_channels: 8

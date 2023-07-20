@@ -305,6 +305,7 @@ class DDPM(pl.LightningModule):
             if not only_model
             else self.model.load_state_dict(sd, strict=False)
         )
+        self.mask_model.load_state_dict(sd, strict=False)
         print(
             f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys"
         )

@@ -137,7 +137,6 @@ class DDPM(pl.LightningModule):
             # If initialing from EMA-only checkpoint, create EMA model after loading.
             if self.use_ema and not load_ema:
                 self.model_ema = LitEma(self.model)
-                self.mask_model_ema = LitEma(self.mask_model)
                 print(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
 
         self.register_schedule(
@@ -255,9 +254,6 @@ class DDPM(pl.LightningModule):
         if self.use_ema:
             self.model_ema.store(self.model.parameters())
             self.model_ema.copy_to(self.model)
-
-            self.mask_model_ema.store(self.mask_model.parameters())
-            self.mask_model_ema.copy_to(self.mask_model)
             if context is not None:
                 print(f"{context}: Switched to EMA weights")
         try:
@@ -265,7 +261,6 @@ class DDPM(pl.LightningModule):
         finally:
             if self.use_ema:
                 self.model_ema.restore(self.model.parameters())
-                self.mask_model_ema.restore(self.mask_model.parameters())
                 if context is not None:
                     print(f"{context}: Restored training weights")
 
@@ -305,7 +300,6 @@ class DDPM(pl.LightningModule):
             if not only_model
             else self.model.load_state_dict(sd, strict=False)
         )
-        self.mask_model.load_state_dict(sd, strict=False)
         print(
             f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys"
         )

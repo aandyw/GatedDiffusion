@@ -30,7 +30,6 @@ class EditDataset(Dataset):
         self.max_resize_res = max_resize_res
         self.crop_res = crop_res
         self.flip_prob = flip_prob
-        self.count = 0
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -40,9 +39,6 @@ class EditDataset(Dataset):
         image_0 = sample["source_img"]
         image_1 = sample["target_img"]
         prompt = sample["instruction"]
-
-        self.count += 1
-        print(f"{self.count}")
 
         reize_res = torch.randint(
             self.min_resize_res, self.max_resize_res + 1, ()

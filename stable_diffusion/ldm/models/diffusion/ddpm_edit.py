@@ -1884,11 +1884,14 @@ class LatentDiffusion(DDPM):
                     z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
                     diffusion_row.append(self.decode_first_stage(z_noisy))
 
+                    mask_model_out = self.apply_mask_model(z_noisy, t, c)
+
             diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
             diffusion_grid = rearrange(diffusion_row, "n b c h w -> b n c h w")
             diffusion_grid = rearrange(diffusion_grid, "b n c h w -> (b n) c h w")
             diffusion_grid = make_grid(diffusion_grid, nrow=diffusion_row.shape[0])
             log["diffusion_row"] = diffusion_grid
+            log['mask_unet_out'] = mask_model_out
 
         if sample:
             # get denoise row

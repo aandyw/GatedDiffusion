@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import torch
 import torchvision
@@ -56,6 +57,9 @@ class EditDataset(Dataset):
         crop = torchvision.transforms.RandomCrop(self.crop_res)
         flip = torchvision.transforms.RandomHorizontalFlip(float(self.flip_prob))
         image_0, image_1 = flip(crop(torch.cat((image_0, image_1)))).chunk(2)
+
+        if image_0.shape != (3, self.crop_res, self.crop_res):
+            return self.__getitem__(i + 1)
 
         return dict(edited=image_1, edit=dict(c_concat=image_0, c_crossattn=prompt))
 

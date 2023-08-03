@@ -111,6 +111,7 @@ class DDPM(pl.LightningModule):
         self.model = DiffusionWrapper(unet_config, conditioning_key)
         self.mask_model = DiffusionWrapper(mask_unet_config, conditioning_key)
         count_params(self.model, verbose=True)
+        count_params(self.mask_model, verbose=True)
         self.use_ema = use_ema
 
         self.use_scheduler = scheduler_config is not None
@@ -294,6 +295,11 @@ class DDPM(pl.LightningModule):
                 if k.startswith(ik):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
+
+            if k.startswith("model.diffusion_model.") and k not in ignore_keys:
+                new_key = k.replace("model", "mask_model", 1)
+                sd[new_key] = sd[k]
+        
         missing, unexpected = (
             self.load_state_dict(sd, strict=False)
             if not only_model
@@ -1123,7 +1129,7 @@ class LatentDiffusion(DDPM):
 
     def shared_step(self, batch, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c)
+        loss = self(x, c)  # forward
         return loss
 
     def forward(self, x, c, *args, **kwargs):
@@ -1300,7 +1306,7 @@ class LatentDiffusion(DDPM):
             if not isinstance(cond, list):
                 cond = [cond]
             key = (
-                "c_concat" if self.model.conditioning_key == "concat" else "c_crossattn"
+                "c_concat" if self.mask_model.conditioning_key == "concat" else "c_crossattn"
             )
             cond = {key: cond}
 
@@ -1514,6 +1520,8 @@ class LatentDiffusion(DDPM):
     ):
         t_in = t
         model_out = self.apply_model(x, t_in, c, return_ids=return_codebook_ids)
+        mask_model_out = self.apply_mask_model(x, t_in, c, return_ids=return_codebook_ids)
+        model_out = mask_model_out * model_out + (1 - mask_model_out) * x
 
         if score_corrector is not None:
             assert self.parameterization == "eps"
@@ -1539,11 +1547,28 @@ class LatentDiffusion(DDPM):
             x_start=x_recon, x_t=x, t=t
         )
         if return_codebook_ids:
-            return model_mean, posterior_variance, posterior_log_variance, logits
+            return (
+                model_mean,
+                posterior_variance,
+                posterior_log_variance,
+                logits,
+                mask_model_out
+            )
         elif return_x0:
-            return model_mean, posterior_variance, posterior_log_variance, x_recon
+            return (
+                model_mean,
+                posterior_variance,
+                posterior_log_variance,
+                x_recon,
+                mask_model_out
+            )
         else:
-            return model_mean, posterior_variance, posterior_log_variance
+            return (
+                model_mean,
+                posterior_variance,
+                posterior_log_variance,
+                mask_model_out,
+            )
 
     @torch.no_grad()
     def p_sample(
@@ -1577,9 +1602,9 @@ class LatentDiffusion(DDPM):
             raise DeprecationWarning("Support dropped.")
             model_mean, _, model_log_variance, logits = outputs
         elif return_x0:
-            model_mean, _, model_log_variance, x0 = outputs
+            model_mean, _, model_log_variance, x0, mask_model_out = outputs
         else:
-            model_mean, _, model_log_variance = outputs
+            model_mean, _, model_log_variance, mask_model_out = outputs
 
         noise = noise_like(x.shape, device, repeat_noise) * temperature
         if noise_dropout > 0.0:
@@ -1587,17 +1612,21 @@ class LatentDiffusion(DDPM):
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
 
+        img = model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+
         if return_codebook_ids:
-            return model_mean + nonzero_mask * (
-                0.5 * model_log_variance
-            ).exp() * noise, logits.argmax(dim=1)
+            return img, logits.argmax(dim=1)
         if return_x0:
             return (
-                model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise,
+                img,
                 x0,
+                mask_model_out,
             )
         else:
-            return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+            return (
+                img,
+                mask_model_out,
+            )
 
     @torch.no_grad()
     def progressive_denoising(
@@ -1668,7 +1697,7 @@ class LatentDiffusion(DDPM):
                 tc = self.cond_ids[ts].to(cond.device)
                 cond = self.q_sample(x_start=cond, t=tc, noise=torch.randn_like(cond))
 
-            img, x0_partial = self.p_sample(
+            img, x0_partial, mask_model_out = self.p_sample(
                 img,
                 cond,
                 ts,
@@ -1742,7 +1771,7 @@ class LatentDiffusion(DDPM):
                 tc = self.cond_ids[ts].to(cond.device)
                 cond = self.q_sample(x_start=cond, t=tc, noise=torch.randn_like(cond))
 
-            img = self.p_sample(
+            img, mask_model_out = self.p_sample(
                 img,
                 cond,
                 ts,
@@ -1761,8 +1790,8 @@ class LatentDiffusion(DDPM):
                 img_callback(img, i)
 
         if return_intermediates:
-            return img, intermediates
-        return img
+            return img, intermediates, mask_model_out
+        return img, mask_model_out
 
     @torch.no_grad()
     def sample(
@@ -1817,11 +1846,11 @@ class LatentDiffusion(DDPM):
             )
 
         else:
-            samples, intermediates = self.sample(
+            samples, intermediates, mask_model_out = self.sample(
                 cond=cond, batch_size=batch_size, return_intermediates=True, **kwargs
             )
 
-        return samples, intermediates
+        return samples, intermediates, mask_model_out
 
     @torch.no_grad()
     def log_images(
@@ -1871,7 +1900,6 @@ class LatentDiffusion(DDPM):
                 log["conditioning"] = xc
             if ismap(xc):
                 log["original_conditioning"] = self.to_rgb(xc)
-
         if plot_diffusion_rows:
             # get diffusion row
             diffusion_row = list()
@@ -1884,19 +1912,15 @@ class LatentDiffusion(DDPM):
                     z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
                     diffusion_row.append(self.decode_first_stage(z_noisy))
 
-                    mask_model_out = self.apply_mask_model(z_noisy, t, c)
-
             diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
             diffusion_grid = rearrange(diffusion_row, "n b c h w -> b n c h w")
             diffusion_grid = rearrange(diffusion_grid, "b n c h w -> (b n) c h w")
             diffusion_grid = make_grid(diffusion_grid, nrow=diffusion_row.shape[0])
             log["diffusion_row"] = diffusion_grid
-            log['mask_unet_out'] = mask_model_out
-
         if sample:
             # get denoise row
             with self.ema_scope("Plotting"):
-                samples, z_denoise_row = self.sample_log(
+                samples, z_denoise_row, mask_model_out = self.sample_log(
                     cond=c,
                     batch_size=N,
                     ddim=use_ddim,
@@ -1906,6 +1930,15 @@ class LatentDiffusion(DDPM):
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
+
+            upsample = nn.Upsample(
+                size=(x_samples.shape[-1], x_samples.shape[-1]),
+                mode="bilinear",
+                align_corners=False,
+            )
+            mask_model_map = upsample(mask_model_out)
+            log["mask_model_map"] = mask_model_map
+
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid
@@ -1967,7 +2000,7 @@ class LatentDiffusion(DDPM):
 
         if plot_progressive_rows:
             with self.ema_scope("Plotting Progressives"):
-                img, progressives = self.progressive_denoising(
+                img, progressives, _ = self.progressive_denoising(
                     c,
                     shape=(self.channels, self.image_size, self.image_size),
                     batch_size=N,
@@ -1986,7 +2019,7 @@ class LatentDiffusion(DDPM):
 
     def configure_optimizers(self):
         lr = self.learning_rate
-        params = list(self.model.parameters())
+        params = list(self.model.parameters()) + list(self.mask_model.parameters())
         if self.cond_stage_trainable:
             print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
             params = params + list(self.cond_stage_model.parameters())

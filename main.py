@@ -458,6 +458,7 @@ class ImageLogger(Callback):
             "inputs": "after",
             "reconstruction": "before-vq",
             "samples": "after-gen",
+            "mask_model_map": "mask",
         }
         # print(root)
         for k in images:
@@ -860,7 +861,6 @@ if __name__ == "__main__":
             # run all checkpoint hooks
             if trainer.global_rank == 0:
                 print("Summoning checkpoint.")
-                return
                 ckpt_path = os.path.join(ckptdir, "last.ckpt")
                 trainer.save_checkpoint(ckpt_path)
 

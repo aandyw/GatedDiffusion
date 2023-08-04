@@ -296,8 +296,12 @@ class DDPM(pl.LightningModule):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
 
-            if k.startswith("model.diffusion_model.") and k not in ignore_keys:
-                new_key = k.replace("model", "mask_model", 1)
+            new_key = k.replace("model", "mask_model", 1)
+            if (
+                k.startswith("model.diffusion_model.") and
+                new_key not in sd and
+                k not in ignore_keys
+            ):
                 sd[new_key] = sd[k]
         
         missing, unexpected = (
@@ -1486,8 +1490,14 @@ class LatentDiffusion(DDPM):
             dim=[1, 2, 3]
         )
 
-        # loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
         loss_dict.update({f"{prefix}/loss_simple": loss_simple.mean()})
+
+        # L1 norm to promote sparsity
+        l1_norm = torch.sum(torch.abs(mask_model_out))
+        l1_scale = 0.01
+        sparsity_loss = l1_scale * l1_norm
+
+        loss_dict.update({"sparsity_loss": sparsity_loss})
 
         logvar_t = self.logvar[t].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
@@ -1496,7 +1506,7 @@ class LatentDiffusion(DDPM):
             loss_dict.update({f"{prefix}/loss_gamma": loss.mean()})
             loss_dict.update({"logvar": self.logvar.data.mean()})
 
-        loss = self.l_simple_weight * loss.mean()
+        loss = self.l_simple_weight * loss.mean() + sparsity_loss
 
         loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
@@ -1521,7 +1531,6 @@ class LatentDiffusion(DDPM):
         t_in = t
         model_out = self.apply_model(x, t_in, c, return_ids=return_codebook_ids)
         mask_model_out = self.apply_mask_model(x, t_in, c, return_ids=return_codebook_ids)
-        model_out = mask_model_out * model_out + (1 - mask_model_out) * x
 
         if score_corrector is not None:
             assert self.parameterization == "eps"
@@ -1789,6 +1798,10 @@ class LatentDiffusion(DDPM):
             if img_callback:
                 img_callback(img, i)
 
+        encoded_x0 = self.encode_first_stage(x0)
+        encoded_x0 = self.get_first_stage_encoding(encoded_x0).detach()
+        img = mask_model_out * img + (1 - mask_model_out) * encoded_x0
+
         if return_intermediates:
             return img, intermediates, mask_model_out
         return img, mask_model_out
@@ -1926,6 +1939,7 @@ class LatentDiffusion(DDPM):
                     ddim=use_ddim,
                     ddim_steps=ddim_steps,
                     eta=ddim_eta,
+                    x0 = x
                 )
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
             x_samples = self.decode_first_stage(samples)
@@ -1938,6 +1952,8 @@ class LatentDiffusion(DDPM):
             )
             mask_model_map = upsample(mask_model_out)
             log["mask_model_map"] = mask_model_map
+
+            print(torch.unique(mask_model_out))
 
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)

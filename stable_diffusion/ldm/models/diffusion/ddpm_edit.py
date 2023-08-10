@@ -1492,9 +1492,19 @@ class LatentDiffusion(DDPM):
 
         loss_dict.update({f"{prefix}/loss_simple": loss_simple.mean()})
 
+        loss_simple_ip2p = self.get_loss(model_output, target, mean=False).mean(
+            dim=[1, 2, 3]
+        )
+
+        loss_dict.update({f"{prefix}/loss_simple_ip2p": loss_simple_ip2p.mean()})
+
         # L1 norm to promote sparsity
-        l1_norm = torch.sum(torch.abs(mask_model_out))
+        threshold = 0.5 # soft-threshold to control sparsity
         l1_scale = 0.01
+
+        sparse_mask = np.sign(mask_model_out) * np.maximum(np.abs(mask_model_out) - threshold, 0)
+        l1_norm = torch.sum(torch.abs(sparse_mask))
+        
         sparsity_loss = l1_scale * l1_norm
 
         loss_dict.update({"sparsity_loss": sparsity_loss})
@@ -1506,7 +1516,9 @@ class LatentDiffusion(DDPM):
             loss_dict.update({f"{prefix}/loss_gamma": loss.mean()})
             loss_dict.update({"logvar": self.logvar.data.mean()})
 
-        loss = self.l_simple_weight * loss.mean() + sparsity_loss
+        loss_ip2p = loss_simple_ip2p / torch.exp(logvar_t) + logvar_t
+
+        loss = self.l_simple_weight * loss.mean() + sparsity_loss + loss_ip2p
 
         loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()

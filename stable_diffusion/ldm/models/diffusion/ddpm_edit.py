@@ -1502,7 +1502,7 @@ class LatentDiffusion(DDPM):
         threshold = 0.5 # soft-threshold to control sparsity
         l1_scale = 0.01
 
-        sparse_mask = np.sign(mask_model_out) * np.maximum(np.abs(mask_model_out) - threshold, 0)
+        sparse_mask = torch.sign(mask_model_out) * torch.maximum(torch.abs(mask_model_out) - threshold, torch.tensor(0.))
         l1_norm = torch.sum(torch.abs(sparse_mask))
         
         sparsity_loss = l1_scale * l1_norm

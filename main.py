@@ -6,6 +6,7 @@ import torchvision
 import pytorch_lightning as pl
 import json
 import pickle
+import wandb
 
 from packaging import version
 from omegaconf import OmegaConf
@@ -454,13 +455,19 @@ class ImageLogger(Callback):
     ):
         root = os.path.join(save_dir, "images", split)
         names = {
-            "reals": "before",
-            "inputs": "after",
-            "reconstruction": "before-vq",
-            "samples": "after-gen",
+            # "reals": "before",
+            # "inputs": "after",
+            # "reconstruction": "before-vq",
+            # "samples": "after-gen",
+            "reals": "reals",
+            "inputs": "inputs",
+            "reconstruction": "reconstruction",
+            "samples": "samples",
             "mask_model_map": "mask",
         }
-        # print(root)
+
+        val_images = []
+
         for k in images:
             grid = torchvision.utils.make_grid(images[k], nrow=8)
             if self.rescale:
@@ -473,8 +480,13 @@ class ImageLogger(Callback):
             )
             path = os.path.join(root, filename)
             os.makedirs(os.path.split(path)[0], exist_ok=True)
-            # print(path)
-            Image.fromarray(grid).save(path)
+            img = Image.fromarray(grid)
+            img.save(path)
+
+            val_image = wandb.Image(img, caption=names[k])
+            val_images.append(val_image)
+
+        wandb.log({"val_images": val_images})
 
         filename = "gs-{:06}_e-{:06}_b-{:06}_prompt.json".format(
             global_step, current_epoch, batch_idx

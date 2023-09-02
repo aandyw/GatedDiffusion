@@ -1502,7 +1502,7 @@ class LatentDiffusion(DDPM):
         threshold = 0.5 # soft-threshold to control sparsity
         l1_scale = 0.01
 
-        sparse_mask = torch.sign(mask_model_out) * torch.maximum(torch.abs(mask_model_out) - threshold, torch.tensor(0.))
+        sparse_mask = torch.sign(mask_model_out) * torch.relu(torch.abs(mask_model_out) - threshold)
         l1_norm = torch.sum(torch.abs(sparse_mask))
         
         sparsity_loss = l1_scale * l1_norm
@@ -1518,7 +1518,7 @@ class LatentDiffusion(DDPM):
 
         loss_ip2p = loss_simple_ip2p / torch.exp(logvar_t) + logvar_t
 
-        loss = self.l_simple_weight * loss.mean() + sparsity_loss + loss_ip2p
+        loss = self.l_simple_weight * loss.mean() + sparsity_loss + loss_ip2p.mean()
 
         loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()

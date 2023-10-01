@@ -5,7 +5,8 @@ model:
   base_learning_rate: 1.0e-04
   target: ldm.models.diffusion.ddpm_edit.LatentDiffusion
   params:
-    ckpt_path: stable_diffusion/models/ldm/stable-diffusion-v1/v1-5-pruned-emaonly.ckpt
+    # ckpt_path: stable_diffusion/models/ldm/stable-diffusion-v1/v1-5-pruned-emaonly.ckpt
+    ckpt_path: checkpoints/instruct-pix2pix-00-22000.ckpt
     linear_start: 0.00085
     linear_end: 0.0120
     num_timesteps_cond: 1
@@ -21,6 +22,7 @@ model:
     scale_factor: 0.18215
     use_ema: true
     load_ema: false
+    parameterization: "x0"
 
     scheduler_config: # 10000 warmup steps
       target: ldm.lr_scheduler.LambdaLinearScheduler
@@ -131,7 +133,7 @@ lightning:
         increase_log_steps: False
 
   trainer:
-    max_epochs: 2000
+    max_epochs: 168
     benchmark: True
     accumulate_grad_batches: 4
     check_val_every_n_epoch: 4

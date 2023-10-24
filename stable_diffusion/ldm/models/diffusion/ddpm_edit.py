@@ -264,7 +264,7 @@ class DDPM(pl.LightningModule):
             if input_weight.size() != sd[input_key].size():
                 print(f"Manual init: {input_key}")
                 input_weight.zero_()
-                input_weight[:, :4, :, :].copy_(sd[input_key])
+                input_weight[:, :8, :, :].copy_(sd[input_key])  # NOTE: Modified to work with source, mask, prompt
                 ignore_keys.append(input_key)
 
         for k in keys:
@@ -1282,7 +1282,6 @@ class LatentDiffusion(DDPM):
     def p_losses(self, x_start, cond, t, src_imgs, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        model_output = self.apply_model(x_noisy, t, cond)
 
         loss_dict = {}
         prefix = "train" if self.training else "val"
@@ -1294,22 +1293,24 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError()
 
-        # NOTE: implementation for loss here
-        mask_model_out = self.apply_mask_model(x_noisy, t, cond)
-        encoded_src = self.encode_first_stage(src_imgs).sample()
-        edit_img_embed = mask_model_out * model_output + (1 - mask_model_out) * encoded_src
-        loss_simple = self.get_loss(edit_img_embed, target, mean=False).mean(dim=[1, 2, 3])
-        loss_dict.update({f"{prefix}/loss_simple": loss_simple.mean()})
+        # NOTE: modified objective loss for gated diffusion
+        src_encoded = self.encode_first_stage(src_imgs).sample()
 
-        loss_simple_ip2p = self.get_loss(model_output, target, mean=False).mean(dim=[1, 2, 3])
-        loss_dict.update({f"{prefix}/loss_simple_ip2p": loss_simple_ip2p.mean()})
+        # TODO: modify conditional information to include [prompt, source_image, mask]
+        mask = self.apply_mask_model(x_noisy, t, cond)
+
+        cond["mask"] = [mask]
+        noise_output = self.apply_model(x_noisy, t, cond)  # noise output
+
+        noise_hat = mask * noise_output + (1 - mask) * (x_noisy - src_encoded)
+        loss_simple = self.get_loss(noise_hat, target, mean=False).mean(dim=[1, 2, 3])
+        loss_dict.update({f"{prefix}/loss_simple": loss_simple.mean()})
 
         # L1 norm to promote sparsity
         threshold = 0.5  # soft-threshold to control sparsity
         l1_scale = 0.01
 
-        sparse_mask = torch.sign(mask_model_out) * torch.relu(torch.abs(mask_model_out) - threshold)
-        l1_norm = torch.sum(torch.abs(mask_model_out))
+        l1_norm = torch.sum(torch.abs(mask))
         sparsity_loss = l1_scale * l1_norm
         loss_dict.update({f"{prefix}/sparsity_loss": sparsity_loss})
 
@@ -1320,12 +1321,10 @@ class LatentDiffusion(DDPM):
             loss_dict.update({f"{prefix}/loss_gamma": loss.mean()})
             loss_dict.update({"logvar": self.logvar.data.mean()})
 
-        loss_ip2p = loss_simple_ip2p / torch.exp(logvar_t) + logvar_t
-
-        # loss = self.l_simple_weight * loss.mean() + sparsity_loss + loss_ip2p.mean()
+        # loss = self.l_simple_weight * loss.mean() + sparsity_loss
         loss = self.l_simple_weight * loss.mean()
 
-        loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
+        loss_vlb = self.get_loss(noise_hat, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f"{prefix}/loss_vlb": loss_vlb})
         loss += self.original_elbo_weight * loss_vlb
@@ -1347,7 +1346,6 @@ class LatentDiffusion(DDPM):
     ):
         t_in = t
         model_out = self.apply_model(x, t_in, c, return_ids=return_codebook_ids)
-        mask_model_out = self.apply_mask_model(x, t_in, c, return_ids=return_codebook_ids)
 
         if score_corrector is not None:
             assert self.parameterization == "eps"
@@ -1369,15 +1367,14 @@ class LatentDiffusion(DDPM):
             x_recon, _, [_, _, indices] = self.first_stage_model.quantize(x_recon)
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         if return_codebook_ids:
-            return (model_mean, posterior_variance, posterior_log_variance, logits, mask_model_out)
+            return (model_mean, posterior_variance, posterior_log_variance, logits)
         elif return_x0:
-            return (model_mean, posterior_variance, posterior_log_variance, x_recon, mask_model_out)
+            return (model_mean, posterior_variance, posterior_log_variance, x_recon)
         else:
             return (
                 model_mean,
                 posterior_variance,
                 posterior_log_variance,
-                mask_model_out,
             )
 
     @torch.no_grad()
@@ -1412,9 +1409,9 @@ class LatentDiffusion(DDPM):
             raise DeprecationWarning("Support dropped.")
             model_mean, _, model_log_variance, logits = outputs
         elif return_x0:
-            model_mean, _, model_log_variance, x0, mask_model_out = outputs
+            model_mean, _, model_log_variance, x0 = outputs
         else:
-            model_mean, _, model_log_variance, mask_model_out = outputs
+            model_mean, _, model_log_variance = outputs
 
         noise = noise_like(x.shape, device, repeat_noise) * temperature
         if noise_dropout > 0.0:
@@ -1427,16 +1424,9 @@ class LatentDiffusion(DDPM):
         # if return_codebook_ids:
         #     return img, logits.argmax(dim=1)
         if return_x0:
-            return (
-                img,
-                x0,
-                mask_model_out,
-            )
+            return img, x0
         else:
-            return (
-                img,
-                mask_model_out,
-            )
+            return img
 
     @torch.no_grad()
     def progressive_denoising(
@@ -1503,7 +1493,7 @@ class LatentDiffusion(DDPM):
                 tc = self.cond_ids[ts].to(cond.device)
                 cond = self.q_sample(x_start=cond, t=tc, noise=torch.randn_like(cond))
 
-            img, x0_partial, mask_model_out = self.p_sample(
+            img, x0_partial = self.p_sample(
                 img,
                 cond,
                 ts,
@@ -1570,6 +1560,12 @@ class LatentDiffusion(DDPM):
             assert x0 is not None
             assert x0.shape[2:3] == mask.shape[2:3]  # spatial size has to match
 
+        # NOTE: modification to sampling for gated diffusion
+        assert x0 is not None
+
+        t = torch.randint(0, timesteps, (x0.shape[0],), device=self.device).long()
+        src_encoded = self.encode_first_stage(x0).sample()
+
         for i in iterator:
             ts = torch.full((b,), i, device=device, dtype=torch.long)
             if self.shorten_cond_schedule:
@@ -1577,16 +1573,21 @@ class LatentDiffusion(DDPM):
                 tc = self.cond_ids[ts].to(cond.device)
                 cond = self.q_sample(x_start=cond, t=tc, noise=torch.randn_like(cond))
 
-            img, mask_model_out = self.p_sample(
+            # TODO: modify conditional information to include [prompt, source_image, mask]
+            mask = self.apply_mask_model(img, t, cond)
+
+            cond["mask"] = [mask]
+            img = self.p_sample(
                 img,
                 cond,
                 ts,
                 clip_denoised=self.clip_denoised,
                 quantize_denoised=quantize_denoised,
             )
+
             if mask is not None:
                 img_orig = self.q_sample(x0, ts)
-                img = img_orig * mask + (1.0 - mask) * img
+                img = img * mask + (1.0 - mask) * img_orig
 
             if i % log_every_t == 0 or i == timesteps - 1:
                 intermediates.append(img)
@@ -1595,12 +1596,11 @@ class LatentDiffusion(DDPM):
             if img_callback:
                 img_callback(img, i)
 
-        encoded_x0 = self.encode_first_stage(x0).sample()
-        img_with_mask = mask_model_out * img + (1 - mask_model_out) * encoded_x0
+        img_with_mask = mask * img + (1.0 - mask) * src_encoded
 
         if return_intermediates:
-            return img, img_with_mask, intermediates, mask_model_out
-        return img, img_with_mask, mask_model_out
+            return img, img_with_mask, intermediates, mask
+        return img, img_with_mask, mask
 
     @torch.no_grad()
     def sample(
@@ -1861,7 +1861,7 @@ class DiffusionWrapper(pl.LightningModule):
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, "concat", "crossattn", "hybrid", "adm"]
 
-    def forward(self, x, t, c_concat: list = None, c_crossattn: list = None):
+    def forward(self, x, t, c_concat: list = None, c_crossattn: list = None, mask: list = None):
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == "concat":
@@ -1871,7 +1871,11 @@ class DiffusionWrapper(pl.LightningModule):
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == "hybrid":
-            xc = torch.cat([x] + c_concat, dim=1)
+            if mask:
+                xc = torch.cat([x] + c_concat + mask, dim=1)
+            else:
+                xc = torch.cat([x] + c_concat, dim=1)
+
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(xc, t, context=cc)
         elif self.conditioning_key == "adm":

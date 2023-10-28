@@ -8,7 +8,7 @@ https://github.com/CompVis/taming-transformers
 
 # File modified by authors of InstructPix2Pix from original (https://github.com/CompVis/stable-diffusion).
 # See more details in LICENSE.
-
+import random
 import torch
 import torch.nn as nn
 import numpy as np
@@ -1279,6 +1279,15 @@ class LatentDiffusion(DDPM):
         kl_prior = normal_kl(mean1=qt_mean, logvar1=qt_log_variance, mean2=0.0, logvar2=0.0)
         return mean_flat(kl_prior) / np.log(2.0)
 
+    def extract_noise(self, x_noisy, x_src, t):
+        # Extract values for the given timestep t
+        sqrt_alpha_t = extract_into_tensor(self.sqrt_alphas_cumprod, t, x_src.shape)
+        sqrt_one_minus_alpha_t = extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_src.shape)
+
+        # Calculate the noise using the rearranged formula
+        noise_tilde = (x_noisy - sqrt_alpha_t * x_src) / sqrt_one_minus_alpha_t
+        return noise_tilde
+
     def p_losses(self, x_start, cond, t, src_imgs, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
@@ -1563,8 +1572,8 @@ class LatentDiffusion(DDPM):
         # NOTE: modification to sampling for gated diffusion
         assert x0 is not None
 
-        t = torch.randint(0, timesteps, (x0.shape[0],), device=self.device).long()
         src_encoded = self.encode_first_stage(x0).sample()
+        masks = []
 
         for i in iterator:
             ts = torch.full((b,), i, device=device, dtype=torch.long)
@@ -1573,8 +1582,8 @@ class LatentDiffusion(DDPM):
                 tc = self.cond_ids[ts].to(cond.device)
                 cond = self.q_sample(x_start=cond, t=tc, noise=torch.randn_like(cond))
 
-            # TODO: modify conditional information to include [prompt, source_image, mask]
-            mask = self.apply_mask_model(img, t, cond)
+            mask = self.apply_mask_model(img, ts, cond)
+            masks.append(mask)
 
             cond["mask"] = [mask]
             img = self.p_sample(
@@ -1584,10 +1593,12 @@ class LatentDiffusion(DDPM):
                 clip_denoised=self.clip_denoised,
                 quantize_denoised=quantize_denoised,
             )
+            del cond["mask"]
 
             if mask is not None:
                 img_orig = self.q_sample(x0, ts)
-                img = img * mask + (1.0 - mask) * img_orig
+                img_orig_encoded = self.encode_first_stage(img_orig).sample()
+                img = mask * img + (1.0 - mask) * img_orig_encoded
 
             if i % log_every_t == 0 or i == timesteps - 1:
                 intermediates.append(img)
@@ -1598,9 +1609,15 @@ class LatentDiffusion(DDPM):
 
         img_with_mask = mask * img + (1.0 - mask) * src_encoded
 
+        mask_final = mask
+        masks = masks[:-1]
+        mask_t = random.choice(masks)
+
+        assert mask_final != mask_t
+
         if return_intermediates:
             return img, img_with_mask, intermediates, mask
-        return img, img_with_mask, mask
+        return img, img_with_mask, mask_final, mask_t
 
     @torch.no_grad()
     def sample(
@@ -1649,11 +1666,11 @@ class LatentDiffusion(DDPM):
             samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size, shape, cond, verbose=False, **kwargs)
 
         else:
-            samples, samples_with_mask, intermediates, mask_model_out = self.sample(
+            samples, samples_with_mask, intermediates, mask_final, mask_t = self.sample(
                 cond=cond, batch_size=batch_size, return_intermediates=True, **kwargs
             )
 
-        return samples, samples_with_mask, intermediates, mask_model_out
+        return samples, samples_with_mask, intermediates, mask_final, mask_t
 
     @torch.no_grad()
     def log_images(
@@ -1723,7 +1740,7 @@ class LatentDiffusion(DDPM):
         if sample:
             # get denoise row
             with self.ema_scope("Plotting"):
-                samples, samples_with_mask, z_denoise_row, mask_model_out = self.sample_log(
+                samples, samples_with_mask, z_denoise_row, mask_final, mask_t = self.sample_log(
                     cond=c, batch_size=N, ddim=use_ddim, ddim_steps=ddim_steps, eta=ddim_eta, x0=x
                 )
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
@@ -1738,10 +1755,11 @@ class LatentDiffusion(DDPM):
                 mode="bilinear",
                 align_corners=False,
             )
-            mask_model_map = upsample(mask_model_out)
-            log["mask_model_map"] = mask_model_map
+            mask_final_out = upsample(mask_final)
+            log["mask_final"] = mask_final_out
 
-            print(torch.unique(mask_model_out))
+            mask_t_out = upsample(mask_t)
+            log["mask_t"] = mask_t_out
 
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
@@ -1767,40 +1785,40 @@ class LatentDiffusion(DDPM):
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_x0_quantized"] = x_samples
 
-            if inpaint:
-                # make a simple center square
-                b, h, w = z.shape[0], z.shape[2], z.shape[3]
-                mask = torch.ones(N, h, w).to(self.device)
-                # zeros will be filled in
-                mask[:, h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = 0.0
-                mask = mask[:, None, ...]
-                with self.ema_scope("Plotting Inpaint"):
-                    samples, _ = self.sample_log(
-                        cond=c,
-                        batch_size=N,
-                        ddim=use_ddim,
-                        eta=ddim_eta,
-                        ddim_steps=ddim_steps,
-                        x0=z[:N],
-                        mask=mask,
-                    )
-                x_samples = self.decode_first_stage(samples.to(self.device))
-                log["samples_inpainting"] = x_samples
-                log["mask"] = mask
+            # if inpaint:
+            #     # make a simple center square
+            #     b, h, w = z.shape[0], z.shape[2], z.shape[3]
+            #     mask = torch.ones(N, h, w).to(self.device)
+            #     # zeros will be filled in
+            #     mask[:, h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = 0.0
+            #     mask = mask[:, None, ...]
+            #     with self.ema_scope("Plotting Inpaint"):
+            #         samples, _ = self.sample_log(
+            #             cond=c,
+            #             batch_size=N,
+            #             ddim=use_ddim,
+            #             eta=ddim_eta,
+            #             ddim_steps=ddim_steps,
+            #             x0=z[:N],
+            #             mask=mask,
+            #         )
+            #     x_samples = self.decode_first_stage(samples.to(self.device))
+            #     log["samples_inpainting"] = x_samples
+            #     log["mask"] = mask
 
-                # outpaint
-                with self.ema_scope("Plotting Outpaint"):
-                    samples, _ = self.sample_log(
-                        cond=c,
-                        batch_size=N,
-                        ddim=use_ddim,
-                        eta=ddim_eta,
-                        ddim_steps=ddim_steps,
-                        x0=z[:N],
-                        mask=mask,
-                    )
-                x_samples = self.decode_first_stage(samples.to(self.device))
-                log["samples_outpainting"] = x_samples
+            #     # outpaint
+            #     with self.ema_scope("Plotting Outpaint"):
+            #         samples, _ = self.sample_log(
+            #             cond=c,
+            #             batch_size=N,
+            #             ddim=use_ddim,
+            #             eta=ddim_eta,
+            #             ddim_steps=ddim_steps,
+            #             x0=z[:N],
+            #             mask=mask,
+            #         )
+            #     x_samples = self.decode_first_stage(samples.to(self.device))
+            #     log["samples_outpainting"] = x_samples
 
         if plot_progressive_rows:
             with self.ema_scope("Plotting Progressives"):

@@ -434,7 +434,8 @@ class ImageLogger(Callback):
             "reconstruction": "reconstruction",
             "samples_without_mask": "samples_without_mask",
             "samples_with_mask": "samples_with_mask",
-            "mask_model_map": "mask",
+            "mask_final": "mask_final",
+            "mask_t": "mask_t",
             "decoded_z_0": "decoded_z_0",
             "diffusion_row": "diffusion_row",
         }

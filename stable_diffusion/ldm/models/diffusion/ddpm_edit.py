@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pytorch_lightning as pl
+import wandb
+from PIL import Image
 from torch.optim.lr_scheduler import LambdaLR
 from einops import rearrange, repeat
 from contextlib import contextmanager
@@ -1310,10 +1312,27 @@ class LatentDiffusion(DDPM):
 
         cond["mask"] = [mask]
         noise_output = self.apply_model(x_noisy, t, cond)  # noise output
+        noise_tilde = self.extract_noise(x_noisy, src_encoded, t)
 
-        noise_hat = mask * noise_output + (1 - mask) * (x_noisy - src_encoded)
+        noise_hat = mask * noise_output + (1 - mask) * noise_tilde
         loss_simple = self.get_loss(noise_hat, target, mean=False).mean(dim=[1, 2, 3])
         loss_dict.update({f"{prefix}/loss_simple": loss_simple.mean()})
+        loss_dict.update({f"{prefix}/Δ_noise_scaling": (target - noise_tilde).mean()})
+        loss_dict.update({f"{prefix}/Δ_noise": (target - (x_noisy - src_encoded)).mean()})
+
+        src_noisy = self.q_sample(x_start=src_encoded, t=t, noise=noise)
+
+        images = {"x_noisy": x_noisy, "src_noisy": src_noisy, "src_encoded": src_encoded, "noise_output": noise_output}
+        wandb_images = []
+        for k, i in images.items():
+            img = Image.fromarray(i)
+
+            wandb_img = wandb.Image(img, caption=k)
+            wandb_images.append(wandb_img)
+
+        wandb.log({f"p_losses_images": wandb_images, "timestep": t})
+
+        # TODO: plot x_noisy, src_noisy, src_encoded, noise_output
 
         # L1 norm to promote sparsity
         threshold = 0.5  # soft-threshold to control sparsity
@@ -1330,8 +1349,7 @@ class LatentDiffusion(DDPM):
             loss_dict.update({f"{prefix}/loss_gamma": loss.mean()})
             loss_dict.update({"logvar": self.logvar.data.mean()})
 
-        # loss = self.l_simple_weight * loss.mean() + sparsity_loss
-        loss = self.l_simple_weight * loss.mean()
+        loss = self.l_simple_weight * loss.mean() + sparsity_loss
 
         loss_vlb = self.get_loss(noise_hat, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
@@ -1613,10 +1631,10 @@ class LatentDiffusion(DDPM):
         masks = masks[:-1]
         mask_t = random.choice(masks)
 
-        assert mask_final != mask_t
+        assert not torch.equal(mask_final, mask_t)
 
         if return_intermediates:
-            return img, img_with_mask, intermediates, mask
+            return img, img_with_mask, intermediates, mask_final, mask_t
         return img, img_with_mask, mask_final, mask_t
 
     @torch.no_grad()

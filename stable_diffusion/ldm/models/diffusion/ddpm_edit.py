@@ -1324,10 +1324,8 @@ class LatentDiffusion(DDPM):
 
         images = {"x_noisy": x_noisy, "src_noisy": src_noisy, "src_encoded": src_encoded, "noise_output": noise_output}
         wandb_images = []
-        for k, i in images.items():
-            img = Image.fromarray(i)
-
-            wandb_img = wandb.Image(img, caption=k)
+        for k, tensor in images.items():
+            wandb_img = wandb.Image(tensor, caption=k)
             wandb_images.append(wandb_img)
 
         wandb.log({f"p_losses_images": wandb_images, "timestep": t})

@@ -84,7 +84,9 @@ def get_parser(**parser_kwargs):
         nargs="?",
         help="disable test",
     )
-    parser.add_argument("-p", "--project", help="name of new or path to existing project")
+    parser.add_argument(
+        "-p", "--project", help="name of new or path to existing project"
+    )
     parser.add_argument(
         "-d",
         "--debug",
@@ -153,7 +155,9 @@ def worker_init_fn(_):
     if isinstance(dataset, Txt2ImgIterableBaseDataset):
         split_size = dataset.num_records // worker_info.num_workers
         # reset num_records to the true number to retain reliable length information
-        dataset.sample_ids = dataset.valid_ids[worker_id * split_size : (worker_id + 1) * split_size]
+        dataset.sample_ids = dataset.valid_ids[
+            worker_id * split_size : (worker_id + 1) * split_size
+        ]
         current_id = np.random.choice(len(np.random.get_state()[1]), 1)
         return np.random.seed(np.random.get_state()[1][current_id] + worker_id)
     else:
@@ -184,10 +188,14 @@ class DataModuleFromConfig(pl.LightningDataModule):
             self.train_dataloader = self._train_dataloader
         if validation is not None:
             self.dataset_configs["validation"] = validation
-            self.val_dataloader = partial(self._val_dataloader, shuffle=shuffle_val_dataloader)
+            self.val_dataloader = partial(
+                self._val_dataloader, shuffle=shuffle_val_dataloader
+            )
         if test is not None:
             self.dataset_configs["test"] = test
-            self.test_dataloader = partial(self._test_dataloader, shuffle=shuffle_test_loader)
+            self.test_dataloader = partial(
+                self._test_dataloader, shuffle=shuffle_test_loader
+            )
         if predict is not None:
             self.dataset_configs["predict"] = predict
             self.predict_dataloader = self._predict_dataloader
@@ -198,13 +206,18 @@ class DataModuleFromConfig(pl.LightningDataModule):
             instantiate_from_config(data_cfg)
 
     def setup(self, stage=None):
-        self.datasets = dict((k, instantiate_from_config(self.dataset_configs[k])) for k in self.dataset_configs)
+        self.datasets = dict(
+            (k, instantiate_from_config(self.dataset_configs[k]))
+            for k in self.dataset_configs
+        )
         if self.wrap:
             for k in self.datasets:
                 self.datasets[k] = WrappedDataset(self.datasets[k])
 
     def _train_dataloader(self):
-        is_iterable_dataset = isinstance(self.datasets["train"], Txt2ImgIterableBaseDataset)
+        is_iterable_dataset = isinstance(
+            self.datasets["train"], Txt2ImgIterableBaseDataset
+        )
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
@@ -220,7 +233,10 @@ class DataModuleFromConfig(pl.LightningDataModule):
         )
 
     def _val_dataloader(self, shuffle=False):
-        if isinstance(self.datasets["validation"], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
+        if (
+            isinstance(self.datasets["validation"], Txt2ImgIterableBaseDataset)
+            or self.use_worker_init_fn
+        ):
             init_fn = worker_init_fn
         else:
             init_fn = None
@@ -234,7 +250,9 @@ class DataModuleFromConfig(pl.LightningDataModule):
         )
 
     def _test_dataloader(self, shuffle=False):
-        is_iterable_dataset = isinstance(self.datasets["train"], Txt2ImgIterableBaseDataset)
+        is_iterable_dataset = isinstance(
+            self.datasets["train"], Txt2ImgIterableBaseDataset
+        )
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
@@ -253,7 +271,10 @@ class DataModuleFromConfig(pl.LightningDataModule):
         )
 
     def _predict_dataloader(self, shuffle=False):
-        if isinstance(self.datasets["predict"], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
+        if (
+            isinstance(self.datasets["predict"], Txt2ImgIterableBaseDataset)
+            or self.use_worker_init_fn
+        ):
             init_fn = worker_init_fn
         else:
             init_fn = None
@@ -291,7 +312,10 @@ class SetupCallback(Callback):
             # os.makedirs(self.cfgdir, exist_ok=True)
 
             if "callbacks" in self.lightning_config:
-                if "metrics_over_trainsteps_checkpoint" in self.lightning_config["callbacks"]:
+                if (
+                    "metrics_over_trainsteps_checkpoint"
+                    in self.lightning_config["callbacks"]
+                ):
                     os.makedirs(
                         os.path.join(self.ckptdir, "trainstep_checkpoints"),
                         exist_ok=True,
@@ -357,7 +381,9 @@ def all_gather(data):
     for _ in size_list:
         tensor_list.append(torch.FloatTensor(size=(max_size,)).cuda().to(tensor_type))
     if local_size != max_size:
-        padding = torch.FloatTensor(size=(max_size - local_size,)).cuda().to(tensor_type)
+        padding = (
+            torch.FloatTensor(size=(max_size - local_size,)).cuda().to(tensor_type)
+        )
         tensor = torch.cat((tensor, padding), dim=0)
     dist.all_gather(tensor_list, tensor)
 
@@ -419,23 +445,29 @@ class ImageLogger(Callback):
             grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
 
             tag = f"{split}/{k}"
-            pl_module.logger.experiment.add_image(tag, grid, global_step=pl_module.global_step)
+            pl_module.logger.experiment.add_image(
+                tag, grid, global_step=pl_module.global_step
+            )
 
     @rank_zero_only
-    def log_local(self, save_dir, split, images, prompts, global_step, current_epoch, batch_idx):
+    def log_local(
+        self, save_dir, split, images, prompts, global_step, current_epoch, batch_idx
+    ):
         root = os.path.join(save_dir, "images", split)
         names = {
             # "reals": "before",
             # "inputs": "after",
             # "reconstruction": "before-vq",
             # "samples": "after-gen",
-            "reals": "reals",
-            "inputs": "inputs",
-            "reconstruction": "reconstruction",
+            "source": "source",
+            "target": "target",
+            # "reconstruction": "reconstruction",
             "samples_without_mask": "samples_without_mask",
             "samples_with_mask": "samples_with_mask",
-            "mask_final": "mask_final",
-            "mask_t": "mask_t",
+            "mask_t_1": "mask_t_1",
+            "mask_t_0.5": "mask_t_0.5",
+            "mask_t_0.25": "mask_t_0.25",
+            "mask_t_0": "mask_t_0",  # final
             "decoded_z_0": "decoded_z_0",
             "diffusion_row": "diffusion_row",
         }
@@ -449,7 +481,9 @@ class ImageLogger(Callback):
             grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
             grid = grid.numpy()
             grid = (grid * 255).astype(np.uint8)
-            filename = "gs-{:06}_e-{:06}_b-{:06}_{}.png".format(global_step, current_epoch, batch_idx, names[k])
+            filename = "gs-{:06}_e-{:06}_b-{:06}_{}.png".format(
+                global_step, current_epoch, batch_idx, names[k]
+            )
             path = os.path.join(root, filename)
             os.makedirs(os.path.split(path)[0], exist_ok=True)
             img = Image.fromarray(grid)
@@ -460,7 +494,9 @@ class ImageLogger(Callback):
 
         wandb.log({f"{split}_images": wandb_images})
 
-        filename = "gs-{:06}_e-{:06}_b-{:06}_prompt.json".format(global_step, current_epoch, batch_idx)
+        filename = "gs-{:06}_e-{:06}_b-{:06}_prompt.json".format(
+            global_step, current_epoch, batch_idx
+        )
         path = os.path.join(root, filename)
         with open(path, "w") as f:
             for p in prompts:
@@ -481,7 +517,9 @@ class ImageLogger(Callback):
                 pl_module.eval()
 
             with torch.no_grad():
-                images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
+                images = pl_module.log_images(
+                    batch, split=split, **self.log_images_kwargs
+                )
 
             prompts = batch["edit"]["c_crossattn"][: self.max_images]
             prompts = [p for ps in all_gather(prompts) for p in ps]
@@ -505,7 +543,9 @@ class ImageLogger(Callback):
                 batch_idx,
             )
 
-            logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
+            logger_log_images = self.logger_log_images.get(
+                logger, lambda *args, **kwargs: None
+            )
             logger_log_images(pl_module, images, pl_module.global_step, split)
 
             if is_train:
@@ -520,15 +560,21 @@ class ImageLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_train_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+    ):
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+    ):
         if not self.disabled and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")
         if hasattr(pl_module, "calibrate_grad_norm"):
-            if (pl_module.calibrate_grad_norm and batch_idx % 25 == 0) and batch_idx > 0:
+            if (
+                pl_module.calibrate_grad_norm and batch_idx % 25 == 0
+            ) and batch_idx > 0:
                 self.log_gradients(trainer, pl_module, batch_idx=batch_idx)
 
 
@@ -711,7 +757,9 @@ if __name__ == "__main__":
         modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
         print(f"Merged modelckpt-cfg: \n{modelckpt_cfg}")
         if version.parse(pl.__version__) < version.parse("1.4.0"):
-            trainer_kwargs["checkpoint_callback"] = instantiate_from_config(modelckpt_cfg)
+            trainer_kwargs["checkpoint_callback"] = instantiate_from_config(
+                modelckpt_cfg
+            )
 
         # add callback which sets up log directory
         default_callbacks_cfg = {
@@ -750,7 +798,9 @@ if __name__ == "__main__":
         else:
             callbacks_cfg = OmegaConf.create()
 
-        print("Caution: Saving checkpoints every n train steps without deleting. This might require some free space.")
+        print(
+            "Caution: Saving checkpoints every n train steps without deleting. This might require some free space."
+        )
         default_metrics_over_trainsteps_ckpt_dict = {
             "metrics_over_trainsteps_checkpoint": {
                 "target": "pytorch_lightning.callbacks.ModelCheckpoint",
@@ -767,12 +817,18 @@ if __name__ == "__main__":
         default_callbacks_cfg.update(default_metrics_over_trainsteps_ckpt_dict)
 
         callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
-        if "ignore_keys_callback" in callbacks_cfg and hasattr(trainer_opt, "resume_from_checkpoint"):
-            callbacks_cfg.ignore_keys_callback.params["ckpt_path"] = trainer_opt.resume_from_checkpoint
+        if "ignore_keys_callback" in callbacks_cfg and hasattr(
+            trainer_opt, "resume_from_checkpoint"
+        ):
+            callbacks_cfg.ignore_keys_callback.params[
+                "ckpt_path"
+            ] = trainer_opt.resume_from_checkpoint
         elif "ignore_keys_callback" in callbacks_cfg:
             del callbacks_cfg["ignore_keys_callback"]
 
-        trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
+        trainer_kwargs["callbacks"] = [
+            instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg
+        ]
 
         trainer = Trainer.from_argparse_args(
             trainer_opt,
@@ -790,7 +846,9 @@ if __name__ == "__main__":
         data.setup()
         print("#### Data #####")
         for k in data.datasets:
-            print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+            print(
+                f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}"
+            )
 
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
@@ -821,8 +879,8 @@ if __name__ == "__main__":
             # run all checkpoint hooks
             if trainer.global_rank == 0:
                 print("Summoning checkpoint.")
-                ckpt_path = os.path.join(ckptdir, "last.ckpt")
-                trainer.save_checkpoint(ckpt_path)
+                # ckpt_path = os.path.join(ckptdir, "last.ckpt")
+                # trainer.save_checkpoint(ckpt_path)
 
         def divein(*args, **kwargs):
             if trainer.global_rank == 0:

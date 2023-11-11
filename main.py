@@ -894,6 +894,7 @@ if __name__ == "__main__":
         signal.signal(signal.SIGUSR2, divein)
 
         # run
+        wandb.init(dir=logdir, name=nowname)
         if opt.train:
             try:
                 trainer.fit(model, data)

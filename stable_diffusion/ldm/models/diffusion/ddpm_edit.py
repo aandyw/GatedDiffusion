@@ -1544,7 +1544,7 @@ class LatentDiffusion(DDPM):
             wandb_img = wandb.Image(tensor, caption=k)
             wandb_images.append(wandb_img)
 
-        wandb.log({f"p_losses_images": wandb_images})
+        wandb.log({"p_losses_images": wandb_images})
 
         # L1 norm to promote sparsity
         threshold = 0.5  # soft-threshold to control sparsity
@@ -1554,7 +1554,7 @@ class LatentDiffusion(DDPM):
         sparsity_loss = l1_scale * l1_norm
         loss_dict.update({f"{prefix}/sparsity_loss": sparsity_loss})
 
-        logvar_t = self.logvar[t].to(self.device)
+        logvar_t = self.logvar[t.cpu()].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
         # loss = loss_simple / torch.exp(self.logvar) + self.logvar
         if self.learn_logvar:
@@ -1568,6 +1568,8 @@ class LatentDiffusion(DDPM):
         loss_dict.update({f"{prefix}/loss_vlb": loss_vlb})
         loss += self.original_elbo_weight * loss_vlb
         loss_dict.update({f"{prefix}/loss": loss})
+
+        torch.cuda.empty_cache()
 
         return loss, loss_dict
 

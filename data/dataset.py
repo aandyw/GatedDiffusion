@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import json
-import math
-from pathlib import Path
-from typing import Any
-
 import numpy as np
-import torch
-import torchvision
+from typing import Any
 from einops import rearrange
 from PIL import Image
+
+import torch
+import torchvision
 from torch.utils.data import Dataset, DataLoader
 
 from datasets import load_dataset
+
+from transformers import CLIPTokenizer
 
 
 class MagicBrushDataset(Dataset):
@@ -20,12 +19,14 @@ class MagicBrushDataset(Dataset):
         self,
         path: str,
         cache_dir: str,
+        model_path: str,
         split: str = "train",
         min_resize_res: int = 256,
         max_resize_res: int = 256,
         crop_res: int = 256,
         flip_prob: float = 0.0,
     ):
+        self.tokenizer = CLIPTokenizer.from_pretrained(model_path, subfolder="tokenizer")
         self.dataset = load_dataset(path, cache_dir=cache_dir, split=split)
         self.min_resize_res = min_resize_res
         self.max_resize_res = max_resize_res
@@ -56,4 +57,12 @@ class MagicBrushDataset(Dataset):
         if image_0.shape != (3, self.crop_res, self.crop_res):
             return self.__getitem__(i + 1)
 
-        return dict(edited=image_1, edit=dict(source=image_0, prompt=prompt))
+        tokenized_prompt = self.tokenizer(
+            prompt,
+            max_length=self.tokenizer.model_max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        return dict(source=image_0, prompt=tokenized_prompt.input_ids, edited=image_1)

@@ -22,7 +22,7 @@ from diffusers.pipelines import StableDiffusionPipeline
 from diffusers.optimization import get_scheduler
 
 import transformers
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel
 
 from data.dataset import MagicBrushDataset
 from models.mask_model import MaskModel
@@ -59,18 +59,33 @@ def main(
     logger.info(accelerator.state, main_process_only=False)
 
     if train_args.seed is not None:
-        set_seed(args.seed)
+        set_seed(train_args.seed)
 
     if accelerator.is_main_process:
-        if train_args.output_dir is not None:
-            os.makedirs(train_args.output_dir, exist_ok=True)
+        if model_args.output_dir is not None:
+            os.makedirs(model_args.output_dir, exist_ok=True)
 
-    train_dataset = MagicBrushDataset(config.data.path, cache_dir=model_args.output_dir)
-    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=train_args.batch_size, shuffle=True)
+    def collate_fn(batch):
+        source_pixel_values = torch.stack([sample["source"] for sample in batch])
+        source_pixel_values = source_pixel_values.to(memory_format=torch.contiguous_format).float()
+        edited_pixel_values = torch.stack([sample["edited"] for sample in batch])
+        edited_pixel_values = edited_pixel_values.to(memory_format=torch.contiguous_format).float()
+        prompts = torch.stack([sample["prompt"] for sample in batch])
+        return {
+            "source_pixel_values": source_pixel_values,
+            "edited_pixel_values": edited_pixel_values,
+            "prompts": prompts,
+        }
+
+    train_dataset = MagicBrushDataset(
+        config.data.path, cache_dir=model_args.output_dir, model_path=model_args.model_path
+    )
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=train_args.batch_size
+    )
 
     # Load scheduler, tokenizer and models.
     noise_scheduler = DDPMScheduler.from_pretrained(model_args.model_path, subfolder="scheduler")
-    tokenizer = CLIPTokenizer.from_pretrained(model_args.model_path, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(model_args.model_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(model_args.model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(model_args.model_path, subfolder="unet")
@@ -92,9 +107,6 @@ def main(
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-
-    # Set unet trainable parameters
-    unet.requires_grad_(False)
 
     if train_args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -141,28 +153,22 @@ def main(
     lr_scheduler = get_scheduler(
         train_args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=train_args.lr_warmup_steps,
-        # num_training_steps=train_args.max_train_steps,
+        num_warmup_steps=train_args.lr_warmup_steps * accelerator.num_processes,
+        num_training_steps=train_args.max_train_steps * accelerator.num_processes,
     )
 
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
+    unet, mask_unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, mask_unet, optimizer, train_dataloader, lr_scheduler
     )
+
+    torch.cuda.empty_cache()
 
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
 
-    def tokenize_captions(captions):
-        inputs = tokenizer(
-            captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-        )
-        return inputs.input_ids
-
     if accelerator.is_main_process:
         accelerator.init_trackers("instruct-pix2pix", config=vars(args))
 
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / train_args.gradient_accumulation_steps)
-    max_train_steps = train_args.num_epochs * num_update_steps_per_epoch
     total_batch_size = train_args.batch_size * accelerator.num_processes * train_args.gradient_accumulation_steps
 
     logging.info("***** Running training *****")
@@ -172,52 +178,85 @@ def main(
     logging.info(f"  Instantaneous batch size per device = {train_args.batch_size}")
     logging.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logging.info(f"  Gradient Accumulation steps = {train_args.gradient_accumulation_steps}")
-    logging.info(f"  Total optimization steps = {max_train_steps}")
+    logging.info(f"  Total optimization steps = {train_args.max_train_steps}")
 
     global_step = 0
     first_epoch = 0
 
     # TODO: finish training loop
+    progress_bar = tqdm(range(global_step, train_args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, train_args.num_epochs):
         unet.train()
         mask_unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            print(batch["edited"].shape)
-            latents = vae.encode(batch["edited"].to(weight_dtype)).latent_dist.sample()
-            noise = torch.randn_like(latents)
-            bsz = latents.shape[0]
-            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-            timesteps = timesteps.long()
+            with accelerator.accumulate(unet):
+                latents = vae.encode(batch["edited_pixel_values"].to(weight_dtype)).latent_dist.sample()
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = timesteps.long()
 
-            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-            encoder_hidden_states = text_encoder(batch["edit"]["prompt"])[0]
-            original_image_embeds = vae.encode(batch["edit"]["source"].to(weight_dtype)).latent_dist.mode()
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                encoder_hidden_states = text_encoder(batch["prompts"])[0]
+                original_image_embeds = vae.encode(batch["source_pixel_values"].to(weight_dtype)).latent_dist.mode()
 
-            # Concatenate the `original_image_embeds` with the `noisy_latents`.
-            concatenated_noisy_latents = torch.cat([noisy_latents, original_image_embeds], dim=1)
+                # Concatenate the `original_image_embeds` with the `noisy_latents`.
+                concatenated_noisy_latents = torch.cat([noisy_latents, original_image_embeds], dim=1)
 
-            if noise_scheduler.config.prediction_type == "epsilon":
-                target = noise
-            else:
-                raise ValueError()
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-            mask = mask_unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
+                mask = mask_unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).mask
 
-            concatenated_noisy_latents = torch.cat([concatenated_noisy_latents, mask], dim=1)
+                concatenated_noisy_latents = torch.cat([noisy_latents, original_image_embeds, mask], dim=1)
 
-            unet_noise = unet(concatenated_noisy_latents, timesteps, timesteps).sample
+                noise_hat = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
-            noise_tilde = noisy_latents - original_image_embeds  # x_noisy - src_encoded
-            noise_hat = mask * unet_noise + (1.0 - mask) * noise_tilde
+                noise_tilde = noisy_latents - original_image_embeds  # x_noisy - src_encoded
+                noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
-            loss = F.mse_loss(noise_hat, target.float(), reduction="mean")
-            train_loss += loss
+                loss = F.mse_loss(noise_hat, target.float(), reduction="mean")
 
-            loss.backward()
+                avg_loss = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
+                train_loss += avg_loss.item() / train_args.gradient_accumulation_steps
 
-            lr_scheduler.step()
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(unet.parameters(), train_args.max_grad_norm)
+                    # NOTE: clip grads of mask unet?
+                    # accelerator.clip_grad_norm_(mask_unet.parameters(), train_args.max_grad_norm)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+
+            if accelerator.sync_gradients:
+                progress_bar.update(1)
+                global_step += 1
+                accelerator.log({"train_loss": train_loss}, step=global_step)
+                train_loss = 0.0
+
+                if global_step % train_args.checkpointing_steps == 0:
+                    if accelerator.is_main_process:
+                        save_path = os.path.join(model_args.output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
+                        logger.info(f"Saved state to {save_path}")
+
+            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            progress_bar.set_postfix(**logs)
+
+        # TODO: inference pipeline
+
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            # TODO: save
+            pass
+
+    accelerator.end_training()
 
 
 if __name__ == "__main__":

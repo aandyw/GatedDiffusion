@@ -36,5 +36,5 @@ class MaskModel(nn.Module):
         encoder_hidden_states: torch.Tensor,
     ) -> Union[MaskModelOutput, Tuple]:
         unet_out = self.unet(noisy_latents, timesteps, encoder_hidden_states).sample
-        out = self.act_fn(unet_out.logits)
+        out = self.act_fn(unet_out)
         return MaskModelOutput(mask=out)

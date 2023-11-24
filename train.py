@@ -26,6 +26,7 @@ from transformers import CLIPTextModel
 
 from data.dataset import MagicBrushDataset
 from models.mask_model import MaskModel
+from utils import scale_images
 
 WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
 
@@ -39,14 +40,17 @@ def main(
     model_args = config.model
     train_args = config.train
 
-    wandb.init(project=config.logging.wandb_project, name=run_name, dir=config.logging.dir)
-
     logging_dir = os.path.join(model_args.output_dir, config.logging.dir)
     accelerator_project_config = ProjectConfiguration(project_dir=model_args.output_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
+        log_with="wandb",
         gradient_accumulation_steps=train_args.gradient_accumulation_steps,
         mixed_precision=train_args.mixed_precision,
         project_config=accelerator_project_config,
+    )
+    accelerator.init_trackers(
+        project_name=config.logging.wandb_project,
+        init_kwargs={"wandb": {"name": run_name, "dir": config.logging.dir}},
     )
 
     generator = torch.Generator(device=accelerator.device).manual_seed(train_args.seed)
@@ -84,12 +88,22 @@ def main(
         train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=train_args.batch_size
     )
 
+    validation_dataset = MagicBrushDataset(
+        config.data.path,
+        cache_dir=model_args.output_dir,
+        model_path=model_args.model_path,
+        split=config.data.val_split_name,
+    )
+    validation_dataloader = torch.utils.data.DataLoader(
+        validation_dataset, shuffle=True, collate_fn=collate_fn, batch_size=train_args.batch_size
+    )
+
     # Load scheduler, tokenizer and models.
     noise_scheduler = DDPMScheduler.from_pretrained(model_args.model_path, subfolder="scheduler")
     text_encoder = CLIPTextModel.from_pretrained(model_args.model_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(model_args.model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(model_args.model_path, subfolder="unet")
-    mask_unet = MaskModel(model_args.model_path, train_args.gradient_checkpointing)
+    mask_unet = MaskModel(model_args.model_path, train_args.gradient_checkpointing, model_args.mask.act_fn)
 
     logging.info("Initializing the InstructPix2Pix UNet from the pretrained UNet.")
     in_channels = 12
@@ -187,6 +201,8 @@ def main(
     progress_bar = tqdm(range(global_step, train_args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
+    validation_batch = next(iter(validation_dataloader))
+
     for epoch in range(first_epoch, train_args.num_epochs):
         unet.train()
         mask_unet.train()
@@ -199,12 +215,15 @@ def main(
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                x_noisy = noise_scheduler.add_noise(latents, noise, timesteps)  # noisy latents
                 encoder_hidden_states = text_encoder(batch["prompts"])[0]
-                original_image_embeds = vae.encode(batch["source_pixel_values"].to(weight_dtype)).latent_dist.mode()
+                source_encoded = vae.encode(
+                    batch["source_pixel_values"].to(weight_dtype)
+                ).latent_dist.mode()  # original_image_embeds
+                source_noisy = noise_scheduler.add_noise(source_encoded, noise, timesteps)
 
-                # Concatenate the `original_image_embeds` with the `noisy_latents`.
-                concatenated_noisy_latents = torch.cat([noisy_latents, original_image_embeds], dim=1)
+                # Concatenate the `source_encoded` with the `x_noisy`.
+                concatenated_noisy_latents = torch.cat([x_noisy, source_encoded], dim=1)
 
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
@@ -213,11 +232,11 @@ def main(
 
                 mask = mask_unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).mask
 
-                concatenated_noisy_latents = torch.cat([noisy_latents, original_image_embeds, mask], dim=1)
+                concatenated_noisy_latents = torch.cat([x_noisy, source_encoded, mask], dim=1)
 
                 noise_hat = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
-                noise_tilde = noisy_latents - original_image_embeds  # x_noisy - src_encoded
+                noise_tilde = x_noisy - source_encoded
                 noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
                 loss = F.mse_loss(noise_hat, target.float(), reduction="mean")
@@ -237,7 +256,22 @@ def main(
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log({"train_loss": train_loss}, step=global_step)
+
+                # log images in diffusion process
+                log_images = {
+                    "edited_images": batch["edited_pixel_values"],
+                    "source_images": batch["source_pixel_values"],
+                    "edited_noisy": scale_images(x_noisy),
+                    "source_noisy": scale_images(source_noisy),
+                    "source_encoded": scale_images(source_encoded),
+                }
+
+                wandb_images = []
+                for k, tensor in log_images.items():
+                    wandb_img = wandb.Image(tensor, caption=k)
+                    wandb_images.append(wandb_img)
+
+                accelerator.log({"train_loss": train_loss, "training_images": wandb_images}, step=global_step)
                 train_loss = 0.0
 
                 if global_step % train_args.checkpointing_steps == 0:
@@ -250,11 +284,13 @@ def main(
             progress_bar.set_postfix(**logs)
 
         # TODO: inference pipeline
+        if accelerator.is_main_process and epoch % train_args.validation_epochs == 0:
+            logger.info("Running validation...")
 
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
-            # TODO: save
-            pass
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        # TODO: save pipeline
+        pass
 
     accelerator.end_training()
 

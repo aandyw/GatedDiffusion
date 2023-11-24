@@ -21,13 +21,23 @@ class MaskModelOutput(BaseOutput):
 
 
 class MaskModel(nn.Module):
-    def __init__(self, model_path, gradient_checkpointing):
+    def __init__(self, model_path: str, gradient_checkpointing: str, act_fn: str = "sigmoid"):
         super(MaskModel, self).__init__()
         self.unet = UNet2DConditionModel.from_pretrained(model_path, subfolder="unet")
-        self.act_fn = nn.ReLU()
+        self.act_fn = self.__get_activation(act_fn)
 
         if gradient_checkpointing:
             self.unet.enable_gradient_checkpointing()
+
+    def __get_activation(self, act_fn: str):
+        if act_fn in "sigmoid":
+            return nn.Sigmoid()
+        elif act_fn in "relu":
+            return nn.ReLU()
+        elif act_fn in "lrelu":
+            return nn.LeakyReLU()
+        else:
+            raise ValueError(f"Unsupported activation function: {act_fn}")
 
     def forward(
         self,

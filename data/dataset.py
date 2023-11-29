@@ -57,12 +57,13 @@ class MagicBrushDataset(Dataset):
         if image_0.shape != (3, self.crop_res, self.crop_res):
             return self.__getitem__(i + 1)
 
-        tokenized_prompt = self.tokenizer(
+        prompt = self.tokenizer(
             prompt,
             max_length=self.tokenizer.model_max_length,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
         )
+        prompt = prompt.input_ids
 
-        return dict(source=image_0, prompt=tokenized_prompt.input_ids, edited=image_1)
+        return dict(source=image_0, prompt=prompt, edited=image_1)

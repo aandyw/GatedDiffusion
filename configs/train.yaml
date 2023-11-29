@@ -6,7 +6,7 @@ model:
 
 data:
   path: osunlp/MagicBrush
-  val_split_name: dev
+  val_path: val_dataset
 
 logging:
   dir: logs

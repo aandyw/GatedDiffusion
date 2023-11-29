@@ -3,7 +3,9 @@ import math
 import wandb
 import logging
 import argparse
+import json
 
+from PIL import Image
 from tqdm.auto import tqdm
 from omegaconf import OmegaConf
 from omegaconf import DictConfig
@@ -18,14 +20,14 @@ import torch.nn.functional as F
 import diffusers
 from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler
 from diffusers.models import UNet2DConditionModel
-from diffusers.pipelines import StableDiffusionPipeline
 from diffusers.optimization import get_scheduler
 
 import transformers
-from transformers import CLIPTextModel
+from transformers import CLIPTextModel, CLIPTokenizer
 
 from data.dataset import MagicBrushDataset
-from models.mask_model import MaskModel
+from models.mask_unet_model import MaskUNetModel
+from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
 from utils import scale_images
 
 WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
@@ -41,6 +43,11 @@ def main(
     train_args = config.train
 
     logging_dir = os.path.join(model_args.output_dir, config.logging.dir)
+    logging_dir = os.path.join(logging_dir, run_name)
+
+    if model_args.output_dir is not None:
+        os.makedirs(logging_dir, exist_ok=True)
+
     accelerator_project_config = ProjectConfiguration(project_dir=model_args.output_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
         log_with="wandb",
@@ -50,7 +57,8 @@ def main(
     )
     accelerator.init_trackers(
         project_name=config.logging.wandb_project,
-        init_kwargs={"wandb": {"name": run_name, "dir": config.logging.dir}},
+        config=OmegaConf.to_container(config),
+        init_kwargs={"wandb": {"name": run_name, "dir": logging_dir}},
     )
 
     generator = torch.Generator(device=accelerator.device).manual_seed(train_args.seed)
@@ -64,10 +72,6 @@ def main(
 
     if train_args.seed is not None:
         set_seed(train_args.seed)
-
-    if accelerator.is_main_process:
-        if model_args.output_dir is not None:
-            os.makedirs(model_args.output_dir, exist_ok=True)
 
     def collate_fn(batch):
         source_pixel_values = torch.stack([sample["source"] for sample in batch])
@@ -88,22 +92,23 @@ def main(
         train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=train_args.batch_size
     )
 
-    validation_dataset = MagicBrushDataset(
-        config.data.path,
-        cache_dir=model_args.output_dir,
-        model_path=model_args.model_path,
-        split=config.data.val_split_name,
-    )
-    validation_dataloader = torch.utils.data.DataLoader(
-        validation_dataset, shuffle=True, collate_fn=collate_fn, batch_size=train_args.batch_size
-    )
+    with open(os.path.join(config.data.val_path, "prompts.json"), "r") as json_file:
+        validation_dataset = json.load(json_file)
+
+    if validation_dataset is None:
+        raise ValueError(f"Problem with val_path {config.data.val_path}")
+
+    validation_images = [
+        Image.open(os.path.join(config.data.val_path, dir, "source.jpg")) for dir in validation_dataset.keys()
+    ]
+    validation_prompts = validation_dataset.values()
 
     # Load scheduler, tokenizer and models.
     noise_scheduler = DDPMScheduler.from_pretrained(model_args.model_path, subfolder="scheduler")
     text_encoder = CLIPTextModel.from_pretrained(model_args.model_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(model_args.model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(model_args.model_path, subfolder="unet")
-    mask_unet = MaskModel(model_args.model_path, train_args.gradient_checkpointing, model_args.mask.act_fn)
+    mask_unet = MaskUNetModel.from_pretrained(model_args.model_path, subfolder="unet")
 
     logging.info("Initializing the InstructPix2Pix UNet from the pretrained UNet.")
     in_channels = 12
@@ -197,11 +202,8 @@ def main(
     global_step = 0
     first_epoch = 0
 
-    # TODO: finish training loop
     progress_bar = tqdm(range(global_step, train_args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
-
-    validation_batch = next(iter(validation_dataloader))
 
     for epoch in range(first_epoch, train_args.num_epochs):
         unet.train()
@@ -217,6 +219,9 @@ def main(
 
                 x_noisy = noise_scheduler.add_noise(latents, noise, timesteps)  # noisy latents
                 encoder_hidden_states = text_encoder(batch["prompts"])[0]
+
+                # Get the additional image embedding for conditioning.
+                # Instead of getting a diagonal Gaussian here, we simply take the mode.
                 source_encoded = vae.encode(
                     batch["source_pixel_values"].to(weight_dtype)
                 ).latent_dist.mode()  # original_image_embeds
@@ -232,7 +237,7 @@ def main(
 
                 mask = mask_unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).mask
 
-                concatenated_noisy_latents = torch.cat([x_noisy, source_encoded, mask], dim=1)
+                concatenated_noisy_latents = torch.cat([concatenated_noisy_latents, mask], dim=1)
 
                 noise_hat = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
@@ -246,8 +251,8 @@ def main(
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
+                    # TODO: clip both models
                     accelerator.clip_grad_norm_(unet.parameters(), train_args.max_grad_norm)
-                    # NOTE: clip grads of mask unet?
                     # accelerator.clip_grad_norm_(mask_unet.parameters(), train_args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
@@ -287,9 +292,46 @@ def main(
         if accelerator.is_main_process and epoch % train_args.validation_epochs == 0:
             logger.info("Running validation...")
 
+            pipeline = GatedDiffusionPipeline.from_pretrained(
+                model_args.model_path,
+                unet=accelerator.unwrap_model(unet),
+                mask_unet=accelerator.unwrap_model(mask_unet),
+                text_encoder=accelerator.unwrap_model(text_encoder),
+                vae=accelerator.unwrap_model(vae),
+                torch_dtype=weight_dtype,
+            )
+            pipeline = pipeline.to(accelerator.device)
+            pipeline.set_progress_bar_config(disable=True)
+
+            # run inference on single iamge
+            edited_images = []
+            with torch.autocast(
+                str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
+            ):
+                for validation_prompt, validation_image in zip(validation_prompts, validation_images):
+                    edited_image = pipeline(
+                        noise_scheduler=noise_scheduler,
+                        prompt=validation_prompt,
+                        image=validation_image,
+                        num_inference_steps=20,
+                        image_guidance_scale=1.5,
+                        guidance_scale=1,
+                        generator=generator,
+                    ).images[0]
+                    edited_images.append((validation_image, edited_image, validation_prompt))
+
+            for tracker in accelerator.trackers:
+                if tracker.name == "wandb":
+                    wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
+                    for validation_image, edited_image, validation_prompt in edited_images:
+                        wandb_table.add_data(
+                            wandb.Image(validation_image), wandb.Image(edited_image), validation_prompt
+                        )
+                    tracker.log({"validation": wandb_table})
+
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        # TODO: save pipeline
+        # TODO: `sa`ve pipeline
         pass
 
     accelerator.end_training()

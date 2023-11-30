@@ -47,8 +47,10 @@ def main(
 
     if model_args.output_dir is not None:
         os.makedirs(logging_dir, exist_ok=True)
+        os.makedirs(os.path.join(logging_dir, "checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(logging_dir, "models"), exist_ok=True)
 
-    accelerator_project_config = ProjectConfiguration(project_dir=model_args.output_dir, logging_dir=logging_dir)
+    accelerator_project_config = ProjectConfiguration(project_dir=logging_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
         log_with="wandb",
         gradient_accumulation_steps=train_args.gradient_accumulation_steps,
@@ -281,14 +283,13 @@ def main(
 
                 if global_step % train_args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
-                        save_path = os.path.join(model_args.output_dir, f"checkpoint-{global_step}")
+                        save_path = os.path.join(os.path.join(logging_dir, "checkpoints"), f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
 
-        # TODO: inference pipeline
         if accelerator.is_main_process and epoch % train_args.validation_epochs == 0:
             logger.info("Running validation...")
 
@@ -298,6 +299,7 @@ def main(
                 mask_unet=accelerator.unwrap_model(mask_unet),
                 text_encoder=accelerator.unwrap_model(text_encoder),
                 vae=accelerator.unwrap_model(vae),
+                safety_checker=None,
                 torch_dtype=weight_dtype,
             )
             pipeline = pipeline.to(accelerator.device)
@@ -315,7 +317,7 @@ def main(
                         image=validation_image,
                         num_inference_steps=20,
                         image_guidance_scale=1.5,
-                        guidance_scale=1,
+                        guidance_scale=7,
                         generator=generator,
                     ).images[0]
                     edited_images.append((validation_image, edited_image, validation_prompt))
@@ -331,8 +333,38 @@ def main(
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        # TODO: `sa`ve pipeline
-        pass
+        pipeline = GatedDiffusionPipeline.from_pretrained(
+            model_args.model_path,
+            unet=accelerator.unwrap_model(unet),
+            mask_unet=accelerator.unwrap_model(mask_unet),
+            text_encoder=accelerator.unwrap_model(text_encoder),
+            vae=accelerator.unwrap_model(vae),
+            safety_checker=None,
+            torch_dtype=weight_dtype,
+        )
+        pipeline.save_pretrained(os.path.join(logging_dir, "models"))
+
+        edited_images = []
+        pipeline = pipeline.to(accelerator.device)
+        with torch.autocast(str(accelerator.device).replace(":0", "")):
+            for validation_prompt, validation_image in zip(validation_prompts, validation_images):
+                edited_image = pipeline(
+                    noise_scheduler=noise_scheduler,
+                    prompt=validation_prompt,
+                    image=validation_image,
+                    num_inference_steps=20,
+                    image_guidance_scale=1.5,
+                    guidance_scale=7,
+                    generator=generator,
+                ).images[0]
+                edited_images.append((validation_image, edited_image, validation_prompt))
+
+        for tracker in accelerator.trackers:
+            if tracker.name == "wandb":
+                wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
+                for validation_image, edited_image, validation_prompt in edited_images:
+                    wandb_table.add_data(wandb.Image(validation_image), wandb.Image(edited_image), validation_prompt)
+                tracker.log({"test": wandb_table})
 
     accelerator.end_training()
 

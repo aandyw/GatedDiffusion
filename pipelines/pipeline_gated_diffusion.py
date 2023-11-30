@@ -314,6 +314,8 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         # 9. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
+
+        mask_timestep_100, mask_timestep_50 = None, None
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # Expand the latents if we are doing classifier free guidance.
@@ -330,12 +332,21 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                     scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
                 )[0]
 
+                mask_timestep_100 = mask if i == 0 else mask_timestep_100  # initial mask
+                mask_timestep_50 = mask if i == len(timesteps) // 2 else mask_timestep_50
+
                 scaled_latent_model_input = torch.cat([scaled_latent_model_input, mask], dim=1)
 
                 # predict the noise residual
                 noise_hat = self.unet(
                     scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
                 )[0]
+
+                x_noisy = noise_scheduler.add_noise(latents, noise_hat, t.long())
+                source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
+
+                noise_tilde = x_noisy - source_encoded
+                noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
                 # Hack:
                 # For karras style schedulers the model does classifer free guidance using the
@@ -363,12 +374,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 # predicted_original_sample is correct.
                 if scheduler_is_in_sigma_space:
                     noise_hat = (noise_hat - latents) / (-sigma)
-
-                x_noisy = noise_scheduler.add_noise(latents, noise_hat, t.long())
-                source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
-
-                noise_tilde = x_noisy - source_encoded
-                noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_hat, t, latents, **extra_step_kwargs, return_dict=False)[0]
@@ -403,7 +408,18 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         else:
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
+        # mask_timestep_0 = mask  # final mask
+
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+        # mask_timestep_100 = self.image_processor.postprocess(
+        #     mask_timestep_100, output_type=output_type, do_denormalize=do_denormalize
+        # )
+        # mask_timestep_50 = self.image_processor.postprocess(
+        #     mask_timestep_50, output_type=output_type, do_denormalize=do_denormalize
+        # )
+        # mask_timestep_0 = self.image_processor.postprocess(
+        #     mask_timestep_0, output_type=output_type, do_denormalize=do_denormalize
+        # )
 
         # Offload all models
         self.maybe_free_model_hooks()
@@ -411,7 +427,13 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         if not return_dict:
             return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+        return StableDiffusionPipelineOutput(
+            images=image,
+            nsfw_content_detected=has_nsfw_concept,
+            # mask_timestep_100=mask_timestep_100,
+            # mask_timestep_50=mask_timestep_50,
+            # mask_timestep_0=mask_timestep_0,
+        )
 
     def _encode_prompt(
         self,

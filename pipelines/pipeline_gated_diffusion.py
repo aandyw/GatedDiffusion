@@ -1,17 +1,4 @@
-# Copyright 2023 The InstructPix2Pix Authors and The HuggingFace Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+from dataclasses import dataclass
 import inspect
 from typing import Callable, Dict, List, Optional, Union
 
@@ -24,7 +11,7 @@ from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
 from diffusers.loaders import LoraLoaderMixin, TextualInversionLoaderMixin
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.schedulers import KarrasDiffusionSchedulers, DDPMScheduler
-from diffusers.utils import PIL_INTERPOLATION, deprecate, logging
+from diffusers.utils import PIL_INTERPOLATION, deprecate, logging, BaseOutput
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
@@ -34,6 +21,28 @@ from models.mask_unet_model import MaskUNetModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+# modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_instruct_pix2pix.StableDiffusionInstructPix2PixPipeline
+
+
+@dataclass
+class GatedDiffusionPipelineOutput(BaseOutput):
+    """
+    Output class for the Gated Diffusion Pipeline.
+
+    Args:
+        images (`List[PIL.Image.Image]` or `np.ndarray`)
+            List of denoised PIL images of length `batch_size` or NumPy array of shape `(batch_size, height, width,
+            num_channels)`.
+        nsfw_content_detected (`List[bool]`)
+            List indicating whether the corresponding generated image contains "not-safe-for-work" (nsfw) content or
+            `None` if safety checking could not be performed.
+    """
+
+    images: Union[List[PIL.Image.Image], np.ndarray]
+    nsfw_content_detected: Optional[List[bool]]
+    masks: Union[List[PIL.Image.Image], np.ndarray]
+    final_mask: Union[List[PIL.Image.Image], np.ndarray]
 
 
 class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
@@ -315,7 +324,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
-        mask_timestep_100, mask_timestep_50 = None, None
+        masks = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # Expand the latents if we are doing classifier free guidance.
@@ -331,9 +340,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 mask = self.mask_unet(
                     scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
                 )[0]
-
-                mask_timestep_100 = mask if i == 0 else mask_timestep_100  # initial mask
-                mask_timestep_50 = mask if i == len(timesteps) // 2 else mask_timestep_50
 
                 scaled_latent_model_input = torch.cat([scaled_latent_model_input, mask], dim=1)
 
@@ -356,6 +362,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                     step_index = (self.scheduler.timesteps == t).nonzero()[0].item()
                     sigma = self.scheduler.sigmas[step_index]
                     noise_hat = latent_model_input - sigma * noise_hat
+                    mask = latent_model_input - sigma * mask
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
@@ -364,6 +371,12 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                         noise_pred_uncond
                         + self.guidance_scale * (noise_pred_text - noise_pred_image)
                         + self.image_guidance_scale * (noise_pred_image - noise_pred_uncond)
+                    )
+                    mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
+                    mask = (
+                        mask_pred_uncond
+                        + self.guidance_scale * (mask_pred_text - mask_pred_image)
+                        + self.image_guidance_scale * (mask_pred_image - mask_pred_uncond)
                     )
 
                 # Hack:
@@ -374,9 +387,13 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 # predicted_original_sample is correct.
                 if scheduler_is_in_sigma_space:
                     noise_hat = (noise_hat - latents) / (-sigma)
+                    mask = (mask - latents) / (-sigma)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_hat, t, latents, **extra_step_kwargs, return_dict=False)[0]
+
+                if i % 4 == 0:
+                    masks.append(mask)
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -408,18 +425,13 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         else:
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-        # mask_timestep_0 = mask  # final mask
-
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-        # mask_timestep_100 = self.image_processor.postprocess(
-        #     mask_timestep_100, output_type=output_type, do_denormalize=do_denormalize
-        # )
-        # mask_timestep_50 = self.image_processor.postprocess(
-        #     mask_timestep_50, output_type=output_type, do_denormalize=do_denormalize
-        # )
-        # mask_timestep_0 = self.image_processor.postprocess(
-        #     mask_timestep_0, output_type=output_type, do_denormalize=do_denormalize
-        # )
+
+        upsample = torch.nn.Upsample(size=(256, 256), mode="bilinear", align_corners=False)
+        masks = torch.stack([torch.mean(upsample(m).view(-1, 256, 256), dim=0).unsqueeze(0) for m in masks], dim=0)
+        masks = self.image_processor.postprocess(masks)
+        final_mask = torch.mean(upsample(mask).view(-1, 256, 256), dim=0).unsqueeze(0).unsqueeze(0)
+        final_mask = self.image_processor.postprocess(final_mask)
 
         # Offload all models
         self.maybe_free_model_hooks()
@@ -427,12 +439,11 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         if not return_dict:
             return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(
+        return GatedDiffusionPipelineOutput(
             images=image,
             nsfw_content_detected=has_nsfw_concept,
-            # mask_timestep_100=mask_timestep_100,
-            # mask_timestep_50=mask_timestep_50,
-            # mask_timestep_0=mask_timestep_0,
+            masks=masks,
+            final_mask=final_mask,
         )
 
     def _encode_prompt(

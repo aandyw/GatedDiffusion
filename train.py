@@ -30,7 +30,13 @@ from models.mask_unet_model import MaskUNetModel
 from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
 from utils import scale_images
 
-WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "edit_prompt"]
+WANDB_TABLE_COL_NAMES = [
+    "original_image",
+    "edited_image",
+    "edit_prompt",
+    "masks",
+    "final_mask",
+]
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -101,7 +107,8 @@ def main(
         raise ValueError(f"Problem with val_path {config.data.val_path}")
 
     validation_images = [
-        Image.open(os.path.join(config.data.val_path, dir, "source.jpg")) for dir in validation_dataset.keys()
+        Image.open(os.path.join(config.data.val_path, dir, "source.jpg")).convert("RGB").resize((256, 256))
+        for dir in validation_dataset.keys()
     ]
     validation_prompts = validation_dataset.values()
 
@@ -311,7 +318,7 @@ def main(
                 str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
             ):
                 for validation_prompt, validation_image in zip(validation_prompts, validation_images):
-                    edited_image = pipeline(
+                    result = pipeline(
                         noise_scheduler=noise_scheduler,
                         prompt=validation_prompt,
                         image=validation_image,
@@ -319,15 +326,34 @@ def main(
                         image_guidance_scale=1.5,
                         guidance_scale=7,
                         generator=generator,
-                    ).images[0]
-                    edited_images.append((validation_image, edited_image, validation_prompt))
+                    )
+                    edited_image = result.images[0]
+                    edited_images.append(
+                        (
+                            validation_image,
+                            edited_image,
+                            validation_prompt,
+                            result.masks[len(result.masks) // 2 - 1],
+                            result.final_mask[0],
+                        )
+                    )
 
             for tracker in accelerator.trackers:
                 if tracker.name == "wandb":
                     wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
-                    for validation_image, edited_image, validation_prompt in edited_images:
+                    for (
+                        validation_image,
+                        edited_image,
+                        validation_prompt,
+                        masks,
+                        final_mask,
+                    ) in edited_images:
                         wandb_table.add_data(
-                            wandb.Image(validation_image), wandb.Image(edited_image), validation_prompt
+                            wandb.Image(validation_image),
+                            wandb.Image(edited_image),
+                            validation_prompt,
+                            wandb.Image(masks),
+                            wandb.Image(final_mask),
                         )
                     tracker.log({"validation": wandb_table})
 
@@ -348,7 +374,7 @@ def main(
         pipeline = pipeline.to(accelerator.device)
         with torch.autocast(str(accelerator.device).replace(":0", "")):
             for validation_prompt, validation_image in zip(validation_prompts, validation_images):
-                edited_image = pipeline(
+                result = pipeline(
                     noise_scheduler=noise_scheduler,
                     prompt=validation_prompt,
                     image=validation_image,
@@ -356,14 +382,35 @@ def main(
                     image_guidance_scale=1.5,
                     guidance_scale=7,
                     generator=generator,
-                ).images[0]
-                edited_images.append((validation_image, edited_image, validation_prompt))
+                )
+                edited_image = result.images[0]
+                edited_images.append(
+                    (
+                        validation_image,
+                        edited_image,
+                        validation_prompt,
+                        result.masks[len(result.masks) // 2 - 1],
+                        result.final_mask[0],
+                    )
+                )
 
         for tracker in accelerator.trackers:
             if tracker.name == "wandb":
                 wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
-                for validation_image, edited_image, validation_prompt in edited_images:
-                    wandb_table.add_data(wandb.Image(validation_image), wandb.Image(edited_image), validation_prompt)
+                for (
+                    validation_image,
+                    edited_image,
+                    validation_prompt,
+                    masks,
+                    final_mask,
+                ) in edited_images:
+                    wandb_table.add_data(
+                        wandb.Image(validation_image),
+                        wandb.Image(edited_image),
+                        validation_prompt,
+                        wandb.Image(masks),
+                        wandb.Image(final_mask),
+                    )
                 tracker.log({"test": wandb_table})
 
     accelerator.end_training()

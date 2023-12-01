@@ -219,7 +219,7 @@ def main(
         mask_unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(unet):
+            with accelerator.accumulate([unet, mask_unet]):
                 latents = vae.encode(batch["edited_pixel_values"].to(weight_dtype)).latent_dist.sample()
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]

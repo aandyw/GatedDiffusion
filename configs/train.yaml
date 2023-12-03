@@ -1,6 +1,6 @@
 model:
   output_dir: /data/gated_diffusion/
-  model_path: vinesmsuic/magicbrush-jul7
+  model_path: timbrooks/instruct-pix2pix
   mask:
     act_fn: sigmoid
 

@@ -327,9 +327,9 @@ def main(
                         (
                             validation_image,
                             edited_image,
-                            validation_prompt,
                             result.masks[len(result.masks) // 2 - 1],
                             result.final_mask[0],
+                            validation_prompt,
                         )
                     )
 
@@ -339,9 +339,9 @@ def main(
                     for (
                         validation_image,
                         edited_image,
-                        validation_prompt,
                         masks,
                         final_mask,
+                        validation_prompt,
                     ) in edited_images:
                         wandb_table.add_data(
                             wandb.Image(validation_image),
@@ -383,9 +383,9 @@ def main(
                     (
                         validation_image,
                         edited_image,
-                        validation_prompt,
                         result.masks[len(result.masks) // 2 - 1],
                         result.final_mask[0],
+                        validation_prompt,
                     )
                 )
 
@@ -395,16 +395,16 @@ def main(
                 for (
                     validation_image,
                     edited_image,
-                    validation_prompt,
                     masks,
                     final_mask,
+                    validation_prompt,
                 ) in edited_images:
                     wandb_table.add_data(
                         wandb.Image(validation_image),
                         wandb.Image(edited_image),
-                        validation_prompt,
                         wandb.Image(masks),
                         wandb.Image(final_mask),
+                        validation_prompt,
                     )
                 tracker.log({"test": wandb_table})
 

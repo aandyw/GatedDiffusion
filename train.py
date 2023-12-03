@@ -30,13 +30,7 @@ from models.mask_unet_model import MaskUNetModel
 from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
 from utils import scale_images
 
-WANDB_TABLE_COL_NAMES = [
-    "original_image",
-    "edited_image",
-    "edit_prompt",
-    "masks",
-    "final_mask",
-]
+WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "masks", "final_mask", "edit_prompt"]
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -119,25 +113,13 @@ def main(
     unet = UNet2DConditionModel.from_pretrained(model_args.model_path, subfolder="unet")
     mask_unet = MaskUNetModel.from_pretrained(model_args.model_path, subfolder="unet")
 
-    logging.info("Initializing the InstructPix2Pix UNet from the pretrained UNet.")
-    in_channels = 12
-    out_channels = unet.conv_in.out_channels
-    unet.register_to_config(in_channels=in_channels)
-
-    with torch.no_grad():
-        new_conv_in = nn.Conv2d(
-            in_channels, out_channels, unet.conv_in.kernel_size, unet.conv_in.stride, unet.conv_in.padding
-        )
-        new_conv_in.weight.zero_()
-        new_conv_in.weight[:, :8, :, :].copy_(unet.conv_in.weight)
-        unet.conv_in = new_conv_in
-
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
 
     if train_args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
+        mask_unet.enable_gradient_checkpointing()
 
     # create hooks for saving and loading model
     def save_model_hook(models, weights, output_dir):
@@ -178,11 +160,14 @@ def main(
         eps=train_args.adam_epsilon,
     )
 
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / train_args.gradient_accumulation_steps)
+    max_train_steps = train_args.num_epochs * num_update_steps_per_epoch
+
     lr_scheduler = get_scheduler(
         train_args.lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=train_args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=train_args.max_train_steps * accelerator.num_processes,
+        num_training_steps=max_train_steps * accelerator.num_processes,
     )
 
     unet, mask_unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -206,12 +191,12 @@ def main(
     logging.info(f"  Instantaneous batch size per device = {train_args.batch_size}")
     logging.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logging.info(f"  Gradient Accumulation steps = {train_args.gradient_accumulation_steps}")
-    logging.info(f"  Total optimization steps = {train_args.max_train_steps}")
+    logging.info(f"  Total optimization steps = {max_train_steps}")
 
     global_step = 0
     first_epoch = 0
 
-    progress_bar = tqdm(range(global_step, train_args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(global_step, max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, train_args.num_epochs):
@@ -246,11 +231,10 @@ def main(
 
                 mask = mask_unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).mask
 
-                concatenated_noisy_latents = torch.cat([concatenated_noisy_latents, mask], dim=1)
-
                 noise_hat = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
                 noise_tilde = x_noisy - source_encoded
+                # TODO: scale noise_tilde
                 noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
                 loss = F.mse_loss(noise_hat, target.float(), reduction="mean")
@@ -261,8 +245,8 @@ def main(
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     # TODO: clip both models
-                    accelerator.clip_grad_norm_(unet.parameters(), train_args.max_grad_norm)
-                    # accelerator.clip_grad_norm_(mask_unet.parameters(), train_args.max_grad_norm)
+                    accelerator.clip_grad_norm_(mask_unet.parameters(), train_args.max_grad_norm)
+                    # accelerator.clip_grad_norm_(unet.parameters(), train_args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -351,9 +335,9 @@ def main(
                         wandb_table.add_data(
                             wandb.Image(validation_image),
                             wandb.Image(edited_image),
-                            validation_prompt,
                             wandb.Image(masks),
                             wandb.Image(final_mask),
+                            validation_prompt,
                         )
                     tracker.log({"validation": wandb_table})
 

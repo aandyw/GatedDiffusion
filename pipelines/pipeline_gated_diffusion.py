@@ -307,8 +307,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
         # 7. Check that shapes of latents, image, and mask match the UNet channels
         num_channels_image = image_latents.shape[1]
-        num_channels_mask = self.mask_unet.config.out_channels
-        if num_channels_latents + num_channels_image + num_channels_mask != self.unet.config.in_channels:
+        if num_channels_latents + num_channels_image != self.unet.config.in_channels:
             raise ValueError(
                 f"Incorrect configuration settings! The config of `pipeline.unet`: {self.unet.config} expects"
                 f" {self.unet.config.in_channels} but received `num_channels_latents`: {num_channels_latents} +"
@@ -333,26 +332,19 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 latent_model_input = torch.cat([latents] * 3) if self.do_classifier_free_guidance else latents
 
                 # concat latents, image_latents in the channel dimension
-                # TODO: fix classifier free guidance
                 scaled_latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
                 scaled_latent_model_input = torch.cat([scaled_latent_model_input, image_latents], dim=1)
 
                 mask = self.mask_unet(
                     scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
                 )[0]
-
-                scaled_latent_model_input = torch.cat([scaled_latent_model_input, mask], dim=1)
+                mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
+                mask = mask_pred_image
 
                 # predict the noise residual
                 noise_hat = self.unet(
                     scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
                 )[0]
-
-                x_noisy = noise_scheduler.add_noise(latents, noise_hat, t.long())
-                source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
-
-                noise_tilde = x_noisy - source_encoded
-                noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
                 # Hack:
                 # For karras style schedulers the model does classifer free guidance using the
@@ -362,7 +354,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                     step_index = (self.scheduler.timesteps == t).nonzero()[0].item()
                     sigma = self.scheduler.sigmas[step_index]
                     noise_hat = latent_model_input - sigma * noise_hat
-                    mask = latent_model_input - sigma * mask
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
@@ -371,12 +362,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                         noise_pred_uncond
                         + self.guidance_scale * (noise_pred_text - noise_pred_image)
                         + self.image_guidance_scale * (noise_pred_image - noise_pred_uncond)
-                    )
-                    mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
-                    mask = (
-                        mask_pred_uncond
-                        + self.guidance_scale * (mask_pred_text - mask_pred_image)
-                        + self.image_guidance_scale * (mask_pred_image - mask_pred_uncond)
                     )
 
                 # Hack:
@@ -387,7 +372,12 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 # predicted_original_sample is correct.
                 if scheduler_is_in_sigma_space:
                     noise_hat = (noise_hat - latents) / (-sigma)
-                    mask = (mask - latents) / (-sigma)
+
+                x_noisy = noise_scheduler.add_noise(latents, noise_hat, t.long())
+                source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
+
+                noise_tilde = x_noisy - source_encoded
+                # noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_hat, t, latents, **extra_step_kwargs, return_dict=False)[0]

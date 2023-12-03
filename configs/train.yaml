@@ -33,3 +33,6 @@ train:
   max_grad_norm: 1.0
 
   seed: 0
+  resume_from_checkpoint:
+  # resume_from_checkpoint: GD_run_1/checkpoints/checkpoint-500
+

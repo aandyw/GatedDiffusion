@@ -179,8 +179,8 @@ def main(
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
 
-    if accelerator.is_main_process:
-        accelerator.init_trackers("instruct-pix2pix", config=vars(args))
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / train_args.gradient_accumulation_steps)
+    max_train_steps = train_args.num_epochs * num_update_steps_per_epoch
 
     total_batch_size = train_args.batch_size * accelerator.num_processes * train_args.gradient_accumulation_steps
 
@@ -202,6 +202,7 @@ def main(
     for epoch in range(first_epoch, train_args.num_epochs):
         unet.train()
         mask_unet.train()
+        train_loss_ip2p = 0.0
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate([unet, mask_unet]):
@@ -224,6 +225,7 @@ def main(
                 # Concatenate the `source_encoded` with the `x_noisy`.
                 concatenated_noisy_latents = torch.cat([x_noisy, source_encoded], dim=1)
 
+                # we only want to use epsilon parameterization
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 else:
@@ -231,13 +233,18 @@ def main(
 
                 mask = mask_unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).mask
 
-                noise_hat = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
+                model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
                 noise_tilde = x_noisy - source_encoded
                 # TODO: scale noise_tilde
-                noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
+                noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
 
-                loss = F.mse_loss(noise_hat, target.float(), reduction="mean")
+                loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
+
+                loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
+
+                avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
+                train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
 
                 avg_loss = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
                 train_loss += avg_loss.item() / train_args.gradient_accumulation_steps
@@ -269,7 +276,11 @@ def main(
                     wandb_img = wandb.Image(tensor, caption=k)
                     wandb_images.append(wandb_img)
 
-                accelerator.log({"train_loss": train_loss, "training_images": wandb_images}, step=global_step)
+                accelerator.log(
+                    {"train_loss": train_loss, "train_loss_ip2p": train_loss_ip2p, "training_images": wandb_images},
+                    step=global_step,
+                )
+                train_loss_ip2p = 0.0
                 train_loss = 0.0
 
                 if global_step % train_args.checkpointing_steps == 0:

@@ -338,8 +338,10 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 mask = self.mask_unet(
                     scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
                 )[0]
-                mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
-                mask = mask_pred_image
+                
+                if self.do_classifier_free_guidance:
+                    mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
+                    mask = mask_pred_image
 
                 # predict the noise residual
                 noise_hat = self.unet(

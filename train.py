@@ -263,8 +263,24 @@ def main(
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
-                noise_tilde = x_noisy - source_encoded
-                # TODO: scale noise_tilde
+                '''
+                Inverse process of noise_scheduler.add_noise
+                '''
+                alphas_cumprod = noise_scheduler.alphas_cumprod.to(device=latents.device, dtype=latents.dtype)
+                
+                sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
+                sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+                while len(sqrt_alpha_prod.shape) < len(source_encoded.shape):
+                    sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
+                    
+                sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
+                sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+                while len(sqrt_one_minus_alpha_prod.shape) < len(source_encoded.shape):
+                    sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
+                    
+                noise_tilde =(x_noisy - sqrt_alpha_prod * source_encoded) / sqrt_one_minus_alpha_prod
+                
+                
                 noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
 
                 loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")

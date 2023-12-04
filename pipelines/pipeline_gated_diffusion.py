@@ -381,7 +381,23 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                     x_noisy = noise_scheduler.add_noise(latents, noise_hat, t.long())
                     source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
 
-                    noise_tilde = x_noisy - source_encoded
+                    '''
+                    Inverse process of noise_scheduler.add_noise
+                    '''
+                    alphas_cumprod = noise_scheduler.alphas_cumprod.to(device=latents.device, dtype=latents.dtype)
+                    
+                    sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
+                    sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+                    while len(sqrt_alpha_prod.shape) < len(source_encoded.shape):
+                        sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
+                        
+                    sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
+                    sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+                    while len(sqrt_one_minus_alpha_prod.shape) < len(source_encoded.shape):
+                        sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
+                        
+                    noise_tilde =(x_noisy - sqrt_alpha_prod * source_encoded) / sqrt_one_minus_alpha_prod
+                    
                     noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
                 # compute the previous noisy sample x_t -> x_t-1

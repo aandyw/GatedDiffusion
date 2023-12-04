@@ -117,9 +117,10 @@ def main(
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    unet.requires_grad_(False)
 
     if train_args.gradient_checkpointing:
-        unet.enable_gradient_checkpointing()
+        # unet.enable_gradient_checkpointing()
         mask_unet.enable_gradient_checkpointing()
 
     # create hooks for saving and loading model
@@ -152,7 +153,8 @@ def main(
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    params = list(unet.parameters()) + list(mask_unet.parameters())
+    # params = list(unet.parameters()) + list(mask_unet.parameters())
+    params = list(mask_unet.parameters())
     optimizer = torch.optim.AdamW(
         params,
         lr=train_args.learning_rate,
@@ -220,7 +222,7 @@ def main(
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, train_args.num_epochs):
-        unet.train()
+        # unet.train()
         mask_unet.train()
         train_loss_ip2p = 0.0
         train_loss = 0.0
@@ -231,7 +233,7 @@ def main(
                     progress_bar.update(1)
                 continue
 
-            with accelerator.accumulate([unet, mask_unet]):
+            with accelerator.accumulate(mask_unet):
                 latents = vae.encode(batch["edited_pixel_values"].to(weight_dtype)).latent_dist.sample()
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
@@ -333,7 +335,12 @@ def main(
             pipeline.set_progress_bar_config(disable=True)
 
             # run inference on single iamge
-            edited_images = []
+            val_images = {
+                "source_image": [],
+                "edited_image": [],
+                "middle_mask": [],
+                "final_mask": [],
+            }
             with torch.autocast(
                 str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
             ):
@@ -347,35 +354,14 @@ def main(
                         guidance_scale=7,
                         generator=generator,
                     )
-                    edited_image = result.images[0]
-                    edited_images.append(
-                        (
-                            validation_image,
-                            edited_image,
-                            result.masks[len(result.masks) // 2 - 1],
-                            result.final_mask[0],
-                            validation_prompt,
-                        )
-                    )
+                    val_images["source_image"].append(wandb.Image(validation_image, caption=validation_prompt))
+                    val_images["edited_image"].append(wandb.Image(result.images[0]))
+                    val_images["middle_mask"].append(wandb.Image(result.masks[len(result.masks) // 2 - 1]))
+                    val_images["final_mask"].append(wandb.Image(result.final_mask[0]))
 
             for tracker in accelerator.trackers:
                 if tracker.name == "wandb":
-                    wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
-                    for (
-                        validation_image,
-                        edited_image,
-                        masks,
-                        final_mask,
-                        validation_prompt,
-                    ) in edited_images:
-                        wandb_table.add_data(
-                            wandb.Image(validation_image),
-                            wandb.Image(edited_image),
-                            wandb.Image(masks),
-                            wandb.Image(final_mask),
-                            validation_prompt,
-                        )
-                    tracker.log({"validation": wandb_table})
+                    tracker.log(val_images)
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
@@ -389,49 +375,6 @@ def main(
             torch_dtype=weight_dtype,
         )
         pipeline.save_pretrained(os.path.join(logging_dir, "models"))
-        pipeline = pipeline.to(accelerator.device)
-
-        edited_images = []
-        with torch.autocast(str(accelerator.device).replace(":0", "")):
-            for validation_prompt, validation_image in zip(validation_prompts, validation_images):
-                result = pipeline(
-                    noise_scheduler=noise_scheduler,
-                    prompt=validation_prompt,
-                    image=validation_image,
-                    num_inference_steps=20,
-                    image_guidance_scale=1.5,
-                    guidance_scale=7,
-                    generator=generator,
-                )
-                edited_image = result.images[0]
-                edited_images.append(
-                    (
-                        validation_image,
-                        edited_image,
-                        result.masks[len(result.masks) // 2 - 1],
-                        result.final_mask[0],
-                        validation_prompt,
-                    )
-                )
-
-        for tracker in accelerator.trackers:
-            if tracker.name == "wandb":
-                wandb_table = wandb.Table(columns=WANDB_TABLE_COL_NAMES)
-                for (
-                    validation_image,
-                    edited_image,
-                    masks,
-                    final_mask,
-                    validation_prompt,
-                ) in edited_images:
-                    wandb_table.add_data(
-                        wandb.Image(validation_image),
-                        wandb.Image(edited_image),
-                        wandb.Image(masks),
-                        wandb.Image(final_mask),
-                        validation_prompt,
-                    )
-                tracker.log({"test": wandb_table})
 
     accelerator.end_training()
 

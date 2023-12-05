@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import inspect
 from typing import Callable, Dict, List, Optional, Union
 
+import copy
 import numpy as np
 import PIL.Image
 import torch
@@ -18,6 +19,7 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
 from models.mask_unet_model import MaskUNetModel
+from utils import extract_noise
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -43,6 +45,7 @@ class GatedDiffusionPipelineOutput(BaseOutput):
     nsfw_content_detected: Optional[List[bool]]
     masks: Union[List[PIL.Image.Image], np.ndarray]
     final_mask: Union[List[PIL.Image.Image], np.ndarray]
+    image_without_mask: Union[List[PIL.Image.Image], np.ndarray]
 
 
 class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
@@ -378,25 +381,16 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                     noise_hat = (noise_hat - latents) / (-sigma)
 
                 if i == len(timesteps) - 1:
+                    temp_scheduler = copy.deepcopy(self.scheduler)
+                    latents_no_mask = temp_scheduler.step(
+                        noise_hat, t, latents, **extra_step_kwargs, return_dict=False
+                    )[0]
+                    del temp_scheduler
+
                     x_noisy = noise_scheduler.add_noise(latents, noise_hat, t.long())
                     source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
 
-                    '''
-                    Inverse process of noise_scheduler.add_noise
-                    '''
-                    alphas_cumprod = noise_scheduler.alphas_cumprod.to(device=latents.device, dtype=latents.dtype)
-                    
-                    sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
-                    sqrt_alpha_prod = sqrt_alpha_prod.flatten()
-                    while len(sqrt_alpha_prod.shape) < len(source_encoded.shape):
-                        sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
-                        
-                    sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
-                    sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
-                    while len(sqrt_one_minus_alpha_prod.shape) < len(source_encoded.shape):
-                        sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
-                        
-                    noise_tilde =(x_noisy - sqrt_alpha_prod * source_encoded) / sqrt_one_minus_alpha_prod
+                    noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, timesteps)
                     noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
 
                 # compute the previous noisy sample x_t -> x_t-1
@@ -424,7 +418,10 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                         callback(step_idx, t, latents)
 
         if not output_type == "latent":
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            image = self.vae.decode(latents.to(self.vae.dtype) / self.vae.config.scaling_factor, return_dict=False)[0]
+            image_without_mask = self.vae.decode(
+                latents_no_mask.to(self.vae.dtype) / self.vae.config.scaling_factor, return_dict=False
+            )[0]
             image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
         else:
             image = latents
@@ -436,6 +433,9 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+        image_without_mask = self.image_processor.postprocess(
+            image_without_mask, output_type=output_type, do_denormalize=do_denormalize
+        )
 
         upsample = torch.nn.Upsample(size=(256, 256), mode="bilinear", align_corners=False)
         masks = torch.stack([torch.mean(upsample(m).view(-1, 256, 256), dim=0).unsqueeze(0) for m in masks], dim=0)
@@ -454,6 +454,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             nsfw_content_detected=has_nsfw_concept,
             masks=masks,
             final_mask=final_mask,
+            image_without_mask=image_without_mask,
         )
 
     def _encode_prompt(

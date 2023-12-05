@@ -28,9 +28,16 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from data.dataset import MagicBrushDataset
 from models.mask_unet_model import MaskUNetModel
 from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
-from utils import scale_images
+from utils import scale_images, extract_noise
 
-WANDB_TABLE_COL_NAMES = ["original_image", "edited_image", "masks", "final_mask", "edit_prompt"]
+WANDB_TABLE_COL_NAMES = [
+    "original_image",
+    "edited_image",
+    "edited_image_without_mask",
+    "masks",
+    "final_mask",
+    "edit_prompt",
+]
 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -117,10 +124,9 @@ def main(
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    unet.requires_grad_(False)
 
     if train_args.gradient_checkpointing:
-        # unet.enable_gradient_checkpointing()
+        unet.enable_gradient_checkpointing()
         mask_unet.enable_gradient_checkpointing()
 
     # create hooks for saving and loading model
@@ -153,8 +159,7 @@ def main(
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # params = list(unet.parameters()) + list(mask_unet.parameters())
-    params = list(mask_unet.parameters())
+    params = list(unet.parameters()) + list(mask_unet.parameters())
     optimizer = torch.optim.AdamW(
         params,
         lr=train_args.learning_rate,
@@ -222,7 +227,7 @@ def main(
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, train_args.num_epochs):
-        # unet.train()
+        unet.train()
         mask_unet.train()
         train_loss_ip2p = 0.0
         train_loss = 0.0
@@ -263,24 +268,8 @@ def main(
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
-                '''
-                Inverse process of noise_scheduler.add_noise
-                '''
-                alphas_cumprod = noise_scheduler.alphas_cumprod.to(device=latents.device, dtype=latents.dtype)
-                
-                sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
-                sqrt_alpha_prod = sqrt_alpha_prod.flatten()
-                while len(sqrt_alpha_prod.shape) < len(source_encoded.shape):
-                    sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
-                    
-                sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
-                sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
-                while len(sqrt_one_minus_alpha_prod.shape) < len(source_encoded.shape):
-                    sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
-                    
-                noise_tilde =(x_noisy - sqrt_alpha_prod * source_encoded) / sqrt_one_minus_alpha_prod
-                
-                
+                noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, timesteps)
+
                 noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
 
                 loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
@@ -295,7 +284,6 @@ def main(
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    # TODO: clip both models
                     accelerator.clip_grad_norm_(params, train_args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
@@ -354,6 +342,7 @@ def main(
             val_images = {
                 "source_image": [],
                 "edited_image": [],
+                "edited_image_without_mask": [],
                 "middle_mask": [],
                 "final_mask": [],
             }
@@ -372,6 +361,7 @@ def main(
                     )
                     val_images["source_image"].append(wandb.Image(validation_image, caption=validation_prompt))
                     val_images["edited_image"].append(wandb.Image(result.images[0]))
+                    val_images["edited_image_without_mask"].append(wandb.Image(result.image_without_mask[0]))
                     val_images["middle_mask"].append(wandb.Image(result.masks[len(result.masks) // 2 - 1]))
                     val_images["final_mask"].append(wandb.Image(result.final_mask[0]))
 

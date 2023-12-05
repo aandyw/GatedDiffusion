@@ -42,6 +42,8 @@ WANDB_TABLE_COL_NAMES = [
 
 logger = get_logger(__name__, log_level="INFO")
 
+torch.autograd.set_detect_anomaly(True)
+
 
 def main(
     run_name: str,

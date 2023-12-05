@@ -16,7 +16,7 @@ train:
   num_epochs: 200
   validation_epochs: 1
   batch_size: 8
-  mixed_precision: bf16
+  mixed_precision: fp16
   gradient_accumulation_steps: 4
   gradient_checkpointing: True
   checkpointing_steps: 500

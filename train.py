@@ -28,7 +28,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from data.dataset import MagicBrushDataset
 from models.mask_unet_model import MaskUNetModel
 from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
-from utils import scale_images, extract_noise
+from utils import scale_images, extract_noise, visualize_all_masks
 
 WANDB_TABLE_COL_NAMES = [
     "original_image",
@@ -59,6 +59,9 @@ def main(
         os.makedirs(logging_dir, exist_ok=True)
         os.makedirs(os.path.join(logging_dir, "checkpoints"), exist_ok=True)
         os.makedirs(os.path.join(logging_dir, "models"), exist_ok=True)
+
+    if config.inference.method not in ["last", "all", "both", "none"]:
+        raise ValueError(f"Problem with inference method {config.inference.method}")
 
     accelerator_project_config = ProjectConfiguration(project_dir=logging_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
@@ -127,8 +130,12 @@ def main(
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
 
+    if not train_args.joint_training:
+        unet.requires_grad_(False)
+
     if train_args.gradient_checkpointing:
-        unet.enable_gradient_checkpointing()
+        if train_args.joint_training:
+            unet.enable_gradient_checkpointing()
         mask_unet.enable_gradient_checkpointing()
 
     # create hooks for saving and loading model
@@ -161,10 +168,17 @@ def main(
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    params = list(unet.parameters()) + list(mask_unet.parameters())
-    optimizer = torch.optim.AdamW(
-        params,
-        lr=train_args.learning_rate,
+    unet_optimizer = torch.optim.AdamW(
+        unet.parameters(),
+        lr=train_args.unet_learning_rate,
+        betas=(train_args.adam_beta1, train_args.adam_beta2),
+        weight_decay=train_args.adam_weight_decay,
+        eps=train_args.adam_epsilon,
+    )
+
+    mask_optimizer = torch.optim.AdamW(
+        mask_unet.parameters(),
+        lr=train_args.mask_learning_rate,
         betas=(train_args.adam_beta1, train_args.adam_beta2),
         weight_decay=train_args.adam_weight_decay,
         eps=train_args.adam_epsilon,
@@ -173,15 +187,30 @@ def main(
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / train_args.gradient_accumulation_steps)
     max_train_steps = train_args.num_epochs * num_update_steps_per_epoch
 
-    lr_scheduler = get_scheduler(
+    unet_lr_scheduler = get_scheduler(
         train_args.lr_scheduler,
-        optimizer=optimizer,
+        optimizer=unet_optimizer,
         num_warmup_steps=train_args.lr_warmup_steps * accelerator.num_processes,
         num_training_steps=max_train_steps * accelerator.num_processes,
     )
 
-    unet, mask_unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, mask_unet, optimizer, train_dataloader, lr_scheduler
+    mask_lr_scheduler = get_scheduler(
+        train_args.lr_scheduler,
+        optimizer=mask_optimizer,
+        num_warmup_steps=train_args.lr_warmup_steps * accelerator.num_processes,
+        num_training_steps=max_train_steps * accelerator.num_processes,
+    )
+
+    (
+        unet,
+        mask_unet,
+        unet_optimizer,
+        mask_optimizer,
+        train_dataloader,
+        unet_lr_scheduler,
+        mask_lr_scheduler,
+    ) = accelerator.prepare(
+        unet, mask_unet, unet_optimizer, mask_optimizer, train_dataloader, unet_lr_scheduler, mask_lr_scheduler
     )
 
     torch.cuda.empty_cache()
@@ -209,8 +238,6 @@ def main(
     if train_args.resume_from_checkpoint:
         path = os.path.join(model_args.output_dir, config.logging.dir, train_args.resume_from_checkpoint)
 
-        print(path)
-
         if path is None:
             accelerator.print(
                 f"Checkpoint '{train_args.resume_from_checkpoint}' does not exist. Starting a new training run."
@@ -229,8 +256,13 @@ def main(
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, train_args.num_epochs):
-        unet.train()
+        models = [mask_unet]
         mask_unet.train()
+
+        if train_args.joint_training:
+            unet.train()
+            models.append(unet)
+
         train_loss_ip2p = 0.0
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
@@ -240,7 +272,7 @@ def main(
                     progress_bar.update(1)
                 continue
 
-            with accelerator.accumulate(mask_unet):
+            with accelerator.accumulate(models):
                 latents = vae.encode(batch["edited_pixel_values"].to(weight_dtype)).latent_dist.sample()
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
@@ -276,6 +308,15 @@ def main(
 
                 loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
 
+                # def has_nan_or_inf(tensor):
+                #     return torch.isnan(tensor).any() or torch.isinf(tensor).any()
+
+                # print(f"MASK: {has_nan_or_inf(mask)}") # True
+                # print(f"NOISE_TILDE: {has_nan_or_inf(noise_tilde)}")
+                # print(f"NOISE_HAT: {has_nan_or_inf(noise_hat)}")
+                # print(f"MODEL_PRED: {has_nan_or_inf(model_pred)}")
+                # print(f"TARGET: {has_nan_or_inf(target.float())}")
+
                 loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
 
                 avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
@@ -286,10 +327,19 @@ def main(
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
+                    params = list(mask_unet.parameters())
+                    if train_args.joint_training:
+                        params += list(unet.parameters())
                     accelerator.clip_grad_norm_(params, train_args.max_grad_norm)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+
+                mask_optimizer.step()
+                mask_lr_scheduler.step()
+                mask_optimizer.zero_grad()
+
+                if train_args.joint_training:
+                    unet_optimizer.step()
+                    unet_lr_scheduler.step()
+                    unet_optimizer.zero_grad()
 
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -322,7 +372,11 @@ def main(
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {
+                "step_loss": loss.detach().item(),
+                "unet_lr": unet_lr_scheduler.get_last_lr()[0],
+                "mask_lr": mask_lr_scheduler.get_last_lr()[0],
+            }
             progress_bar.set_postfix(**logs)
 
         if accelerator.is_main_process and epoch % train_args.validation_epochs == 0:
@@ -343,15 +397,47 @@ def main(
             # run inference on single iamge
             val_images = {
                 "source_image": [],
-                "edited_image": [],
                 "edited_image_without_mask": [],
-                "middle_mask": [],
-                "final_mask": [],
+                "edited_image_mask_all_timestep": [],
+                "edited_image_mask_last_timestep": [],
+                "masks_all_timestep": [],
+                "masks_last_timestep": [],
             }
             with torch.autocast(
                 str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
             ):
                 for validation_prompt, validation_image in zip(validation_prompts, validation_images):
+                    val_images["source_image"].append(wandb.Image(validation_image, caption=validation_prompt))
+
+                    if config.inference.method == "both" or config.inference.method == "all":
+                        result = pipeline(
+                            noise_scheduler=noise_scheduler,
+                            prompt=validation_prompt,
+                            image=validation_image,
+                            num_inference_steps=20,
+                            image_guidance_scale=1.5,
+                            guidance_scale=7,
+                            generator=generator,
+                            method="all",
+                        )
+                        val_images["edited_image_mask_all_timestep"].append(wandb.Image(result.images[0]))
+                        val_images["masks_all_timestep"].append(wandb.Image(visualize_all_masks(result.masks)))
+
+                    if config.inference.method == "both" or config.inference.method == "last":
+                        result = pipeline(
+                            noise_scheduler=noise_scheduler,
+                            prompt=validation_prompt,
+                            image=validation_image,
+                            num_inference_steps=20,
+                            image_guidance_scale=1.5,
+                            guidance_scale=7,
+                            generator=generator,
+                            method="last",
+                        )
+
+                        val_images["edited_image_mask_last_timestep"].append(wandb.Image(result.images[0]))
+                        val_images["masks_last_timestep"].append(wandb.Image(result.masks[0]))
+
                     result = pipeline(
                         noise_scheduler=noise_scheduler,
                         prompt=validation_prompt,
@@ -360,12 +446,9 @@ def main(
                         image_guidance_scale=1.5,
                         guidance_scale=7,
                         generator=generator,
+                        method="none",
                     )
-                    val_images["source_image"].append(wandb.Image(validation_image, caption=validation_prompt))
-                    val_images["edited_image"].append(wandb.Image(result.images[0]))
-                    val_images["edited_image_without_mask"].append(wandb.Image(result.image_without_mask[0]))
-                    val_images["middle_mask"].append(wandb.Image(result.masks[len(result.masks) // 2 - 1]))
-                    val_images["final_mask"].append(wandb.Image(result.final_mask[0]))
+                    val_images["edited_image_without_mask"].append(wandb.Image(result.images[0]))
 
             for tracker in accelerator.trackers:
                 if tracker.name == "wandb":

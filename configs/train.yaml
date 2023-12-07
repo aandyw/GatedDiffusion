@@ -13,15 +13,19 @@ logging:
   wandb_project: gated-diffusion
 
 train:
+  # joint_training: True - training eps unet + mask unet
+  # joint_training: False - freeze eps unet
+  joint_training: False
   num_epochs: 200
   validation_epochs: 1
   batch_size: 8
   mixed_precision: fp16
   gradient_accumulation_steps: 4
   gradient_checkpointing: True
-  checkpointing_steps: 500
+  checkpointing_steps: 50
 
-  learning_rate: 3e-5
+  unet_learning_rate: 1e-6
+  mask_learning_rate: 1e-4 
   lr_warmup_steps: 0
   lr_scheduler: constant
 
@@ -34,5 +38,12 @@ train:
 
   seed: 0
   resume_from_checkpoint:
-  # resume_from_checkpoint: GD_run_1/checkpoints/checkpoint-500
+  # resume_from_checkpoint: GD_run_4/checkpoints/checkpoint-500
+
+inference:
+  # last - apply mask to last timestep
+  # all - apply mask on all timesteps
+  # both
+  # none - no mask
+  method: both
 

@@ -420,8 +420,10 @@ def main(
                             generator=generator,
                             method="all",
                         )
-                        val_images["edited_image_mask_all_timestep"].append(wandb.Image(result.images[0]))
-                        val_images["masks_all_timestep"].append(wandb.Image(visualize_all_masks(result.masks)))
+                        edited_image = wandb.Image(result.images[0], caption=validation_prompt)
+                        masks = wandb.Image(visualize_all_masks(result.masks), caption=validation_prompt)
+                        val_images["edited_image_mask_all_timestep"].append(edited_image)
+                        val_images["masks_all_timestep"].append(masks)
 
                     if config.inference.method == "both" or config.inference.method == "last":
                         result = pipeline(
@@ -434,9 +436,10 @@ def main(
                             generator=generator,
                             method="last",
                         )
-
-                        val_images["edited_image_mask_last_timestep"].append(wandb.Image(result.images[0]))
-                        val_images["masks_last_timestep"].append(wandb.Image(result.masks[0]))
+                        edited_image = wandb.Image(result.images[0], caption=validation_prompt)
+                        masks = wandb.Image(visualize_all_masks(result.masks), caption=validation_prompt)
+                        val_images["edited_image_mask_last_timestep"].append(edited_image)
+                        val_images["masks_last_timestep"].append(masks)
 
                     result = pipeline(
                         noise_scheduler=noise_scheduler,
@@ -448,7 +451,8 @@ def main(
                         generator=generator,
                         method="none",
                     )
-                    val_images["edited_image_without_mask"].append(wandb.Image(result.images[0]))
+                    edited_image = wandb.Image(result.images[0], caption=validation_prompt)
+                    val_images["edited_image_without_mask"].append(edited_image)
 
             for tracker in accelerator.trackers:
                 if tracker.name == "wandb":

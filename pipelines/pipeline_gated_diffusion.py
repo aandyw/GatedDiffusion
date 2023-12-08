@@ -150,6 +150,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         method: str = "none",
+        hard_mask: bool = False,
         **kwargs,
     ):
         r"""
@@ -379,6 +380,9 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                         mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
                         mask = mask_pred_image
 
+                    if hard_mask:
+                        mask = (mask > 0.5).float()
+
                     x_noisy = noise_scheduler.add_noise(latents, noise_hat, t.long())
                     source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
 
@@ -424,7 +428,12 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         upsample = torch.nn.Upsample(size=(256, 256), mode="bilinear", align_corners=False)
 
         if masks:
-            masks = torch.stack([torch.mean(upsample(m).view(-1, 256, 256), dim=0).unsqueeze(0) for m in masks], dim=0)
+            if len(masks) == 1:
+                masks = torch.mean(upsample(mask).view(-1, 256, 256), dim=0).unsqueeze(0).unsqueeze(0)
+            else:
+                masks = torch.stack(
+                    [torch.mean(upsample(m).view(-1, 256, 256), dim=0).unsqueeze(0) for m in masks], dim=0
+                )
             masks = self.image_processor.postprocess(masks)
 
         # Offload all models

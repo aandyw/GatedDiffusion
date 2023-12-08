@@ -13,9 +13,6 @@ logging:
   wandb_project: gated-diffusion
 
 train:
-  # joint_training: True - training eps unet + mask unet
-  # joint_training: False - freeze eps unet
-  joint_training: False
   num_epochs: 200
   validation_epochs: 1
   batch_size: 8
@@ -40,10 +37,15 @@ train:
   resume_from_checkpoint:
   # resume_from_checkpoint: GD_run_4/checkpoints/checkpoint-500
 
+  # joint_training: True - training eps unet + mask unet
+  # joint_training: False - freeze eps unet
+  joint_training: True
+  hard_mask: True
+
 inference:
   # last - apply mask to last timestep
   # all - apply mask on all timesteps
   # both
   # none - no mask
-  method: both
+  method: last
 

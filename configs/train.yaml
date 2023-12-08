@@ -40,7 +40,6 @@ train:
   # joint_training: True - training eps unet + mask unet
   # joint_training: False - freeze eps unet
   joint_training: True
-  hard_mask: True
 
 inference:
   # last - apply mask to last timestep
@@ -48,4 +47,5 @@ inference:
   # both
   # none - no mask
   method: last
+  hard_mask: True
 

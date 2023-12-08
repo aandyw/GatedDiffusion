@@ -419,7 +419,7 @@ def main(
                             guidance_scale=7,
                             generator=generator,
                             method="all",
-                            hard_mask=train_args.hard_mask,
+                            hard_mask=config.inference.hard_mask,
                         )
                         edited_image = wandb.Image(result.images[0], caption=validation_prompt)
                         masks = wandb.Image(visualize_all_masks(result.masks), caption=validation_prompt)
@@ -436,7 +436,7 @@ def main(
                             guidance_scale=7,
                             generator=generator,
                             method="last",
-                            hard_mask=train_args.hard_mask,
+                            hard_mask=config.inference.hard_mask,
                         )
                         edited_image = wandb.Image(result.images[0], caption=validation_prompt)
                         masks = wandb.Image(result.masks[0], caption=validation_prompt)
@@ -452,7 +452,7 @@ def main(
                         guidance_scale=7,
                         generator=generator,
                         method="none",
-                        hard_mask=train_args.hard_mask,
+                        hard_mask=config.inference.hard_mask,
                     )
                     edited_image = wandb.Image(result.images[0], caption=validation_prompt)
                     val_images["edited_image_without_mask"].append(edited_image)

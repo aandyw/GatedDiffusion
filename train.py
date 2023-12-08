@@ -352,6 +352,9 @@ def main(
                     "edited_noisy": scale_images(x_noisy),
                     "source_noisy": scale_images(source_noisy),
                     "source_encoded": scale_images(source_encoded),
+                    "noise": scale_images(noise),
+                    "noise_tilde": scale_images(noise_tilde),
+                    "noise_hat ": scale_images(noise_hat),
                 }
 
                 wandb_images = []

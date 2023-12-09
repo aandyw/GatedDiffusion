@@ -302,6 +302,7 @@ def main(
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
+                noise_tilde_unscaled = x_noisy - source_encoded
                 noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, timesteps)
 
                 noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
@@ -354,16 +355,15 @@ def main(
                     "source_encoded": scale_images(source_encoded),
                     "noise": scale_images(noise),
                     "noise_tilde": scale_images(noise_tilde),
+                    "noise_tilde_unscaled": scale_images(noise_tilde_unscaled),
                     "noise_hat ": scale_images(noise_hat),
                 }
 
-                wandb_images = []
                 for k, tensor in log_images.items():
-                    wandb_img = wandb.Image(tensor, caption=k)
-                    wandb_images.append(wandb_img)
+                    log_images[k] = [wandb.Image(tensor[i, :, :, :]) for i in range(tensor.shape[0])]
 
                 accelerator.log(
-                    {"train_loss": train_loss, "train_loss_ip2p": train_loss_ip2p, "training_images": wandb_images},
+                    {"train_loss": train_loss, "train_loss_ip2p": train_loss_ip2p, **log_images},
                     step=global_step,
                 )
                 train_loss_ip2p = 0.0

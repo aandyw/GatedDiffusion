@@ -22,7 +22,7 @@ train:
   checkpointing_steps: 50
 
   unet_learning_rate: 1e-6
-  mask_learning_rate: 1e-4 
+  mask_learning_rate: 1e-4
   lr_warmup_steps: 0
   lr_scheduler: constant
 

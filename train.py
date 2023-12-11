@@ -284,15 +284,15 @@ def main(
 
                 # Get the additional image embedding for conditioning.
                 # Instead of getting a diagonal Gaussian here, we simply take the mode.
-                source_encoded = vae.encode(
-                    batch["source_pixel_values"].to(weight_dtype)
-                ).latent_dist.mode()  # original_image_embeds
+
+                # original_image_embed
+                source_encoded = vae.encode(batch["source_pixel_values"].to(weight_dtype)).latent_dist.mode()
                 source_noisy = noise_scheduler.add_noise(source_encoded, noise, timesteps)
 
                 # Concatenate the `source_encoded` with the `x_noisy`.
                 concatenated_noisy_latents = torch.cat([x_noisy, source_encoded], dim=1)
 
-                # we only want to use epsilon parameterization
+                # We only want to use epsilon parameterization
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 else:
@@ -302,21 +302,32 @@ def main(
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
-                noise_tilde_unscaled = x_noisy - source_encoded
-                noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, timesteps)
+                pixel_difference = torch.isclose(
+                    batch["edited_pixel_values"], batch["source_pixel_values"], rtol=1e-2, atol=1e-2
+                )
+                pixel_difference = torch.min(pixel_difference, dim=1)
+                pixel_difference = pixel_difference[0].unsqueeze(1).repeat(1, 4, 1, 1)
 
+                def down_sample(images: torch.FloatTensor, image_size: int = 32) -> torch.FloatTensor:  # 4, 32, 32
+                    scaled_images = F.interpolate(
+                        images.to(torch.float32),
+                        size=(image_size, image_size),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    return scaled_images
+
+                pixel_difference = down_sample(pixel_difference)
+                pixel_difference = (pixel_difference > 0.0).float()  # change to hard mask
+
+                # (8, 4, 32, 32) -> (8, 1, 32, 32) reduce duplicate dimensions
+                ground_truth_mask = (1.0 - pixel_difference[:, :1, :, :]).to(weight_dtype)
+
+                # noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, timesteps)
+                noise_tilde = (1 - ground_truth_mask) * noise
                 noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
 
                 loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
-
-                # def has_nan_or_inf(tensor):
-                #     return torch.isnan(tensor).any() or torch.isinf(tensor).any()
-
-                # print(f"MASK: {has_nan_or_inf(mask)}") # True
-                # print(f"NOISE_TILDE: {has_nan_or_inf(noise_tilde)}")
-                # print(f"NOISE_HAT: {has_nan_or_inf(noise_hat)}")
-                # print(f"MODEL_PRED: {has_nan_or_inf(model_pred)}")
-                # print(f"TARGET: {has_nan_or_inf(target.float())}")
 
                 loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
 
@@ -351,12 +362,21 @@ def main(
                     "edited_images": batch["edited_pixel_values"],
                     "source_images": batch["source_pixel_values"],
                     "edited_noisy": scale_images(x_noisy),
+                    "edited_encoded": scale_images(latents),
                     "source_noisy": scale_images(source_noisy),
                     "source_encoded": scale_images(source_encoded),
                     "noise": scale_images(noise),
-                    "noise_tilde": scale_images(noise_tilde),
-                    "noise_tilde_unscaled": scale_images(noise_tilde_unscaled),
-                    "noise_hat ": scale_images(noise_hat),
+                    "noise_tilde": noise_tilde,
+                    # "noise_tilde_unscaled": scale_images(noise_tilde_unscaled),
+                    "noise_hat": scale_images(noise_hat),
+                    # "noise_tilde_edited": scale_images(noise_tilde_edited),
+                    # "source_noise_removed": scale_images(source_noise_removed),
+                    # "original_samples_diff": scale_images(original_samples_diff),
+                    # "diff_noise_tilde_and_noise": scale_images(noise_tilde - noise),
+                    # "mask_with_noise_tilde": scale_images(mask_with_noise_tilde),
+                    "mask": scale_images(mask),
+                    # "noise_tilde_clip": scale_images(noise_tilde_clip),
+                    "ground_truth_mask": ground_truth_mask,
                 }
 
                 for k, tensor in log_images.items():

@@ -302,12 +302,6 @@ def main(
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
-                pixel_difference = torch.isclose(
-                    batch["edited_pixel_values"], batch["source_pixel_values"], rtol=1e-2, atol=1e-2
-                )
-                pixel_difference = torch.min(pixel_difference, dim=1)
-                pixel_difference = pixel_difference[0].unsqueeze(1).repeat(1, 4, 1, 1)
-
                 def down_sample(images: torch.FloatTensor, image_size: int = 32) -> torch.FloatTensor:  # 4, 32, 32
                     scaled_images = F.interpolate(
                         images.to(torch.float32),
@@ -317,14 +311,21 @@ def main(
                     )
                     return scaled_images
 
-                pixel_difference = down_sample(pixel_difference)
-                pixel_difference = (pixel_difference > 0.0).float()  # change to hard mask
+                # Compute the absolute difference for each pair in the batch
+                differences = torch.abs(torch.subtract(batch["edited_pixel_values"], batch["source_pixel_values"]))
+                differences = down_sample(differences)
 
-                # (8, 4, 32, 32) -> (8, 1, 32, 32) reduce duplicate dimensions
-                ground_truth_mask = (1.0 - pixel_difference[:, :1, :, :]).to(weight_dtype)
+                # Calculate the mean difference across the color channels
+                mean_differences = differences.mean(dim=1)
+
+                # Thresholding to create binary masks for each pair in the batch
+                threshold_value = 0.1  # Adjust as needed
+                ground_truth_mask = torch.where(mean_differences > threshold_value, 1, 0)
+                ground_truth_mask = ground_truth_mask.unsqueeze(1)
+                ground_truth_mask = ground_truth_mask.to(weight_dtype)
 
                 # noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, timesteps)
-                noise_tilde = (1 - ground_truth_mask) * noise
+                noise_tilde = (1.0 - ground_truth_mask) * noise
                 noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
 
                 loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")

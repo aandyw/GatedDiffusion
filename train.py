@@ -317,10 +317,7 @@ def main(
 
                 noise_tilde = None
                 noise_hat = None
-                if not train_args.joint_training:
-                    criterion = nn.CrossEntropyLoss()
-                    loss = criterion(mask, ground_truth_mask)
-                else:
+                if train_args.joint_training:
                     noise_tilde = (1.0 - ground_truth_mask) * noise
                     noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
                     loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
@@ -328,6 +325,9 @@ def main(
 
                     avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
                     train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
+                else:
+                    criterion = nn.BCELoss()
+                    loss = criterion(mask, ground_truth_mask.float())
 
                 avg_loss = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
                 train_loss += avg_loss.item() / train_args.gradient_accumulation_steps

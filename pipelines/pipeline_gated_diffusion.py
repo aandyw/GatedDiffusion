@@ -19,7 +19,7 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
 from models.mask_unet_model import MaskUNetModel
-from utils import extract_noise
+from utils import scale_images
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -425,15 +425,11 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
-        upsample = torch.nn.Upsample(size=(256, 256), mode="bilinear", align_corners=False)
-
         if masks:
             if len(masks) == 1:
-                masks = torch.mean(upsample(mask).view(-1, 256, 256), dim=0).unsqueeze(0).unsqueeze(0)
+                masks = scale_images(mask, 256).view(-1, 256, 256).unsqueeze(0)
             else:
-                masks = torch.stack(
-                    [torch.mean(upsample(m).view(-1, 256, 256), dim=0).unsqueeze(0) for m in masks], dim=0
-                )
+                masks = torch.stack([scale_images(m, 256).view(-1, 256, 256) for m in masks], dim=0)
             masks = self.image_processor.postprocess(masks)
 
         # Offload all models

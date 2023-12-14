@@ -28,7 +28,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from data.dataset import MagicBrushDataset
 from models.mask_unet_model import MaskUNetModel
 from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
-from utils import scale_images, extract_noise, visualize_all_masks
+from utils import scale_images, visualize_all_masks
 
 WANDB_TABLE_COL_NAMES = [
     "original_image",
@@ -284,15 +284,15 @@ def main(
 
                 # Get the additional image embedding for conditioning.
                 # Instead of getting a diagonal Gaussian here, we simply take the mode.
-                source_encoded = vae.encode(
-                    batch["source_pixel_values"].to(weight_dtype)
-                ).latent_dist.mode()  # original_image_embeds
+
+                # original_image_embed
+                source_encoded = vae.encode(batch["source_pixel_values"].to(weight_dtype)).latent_dist.mode()
                 source_noisy = noise_scheduler.add_noise(source_encoded, noise, timesteps)
 
                 # Concatenate the `source_encoded` with the `x_noisy`.
                 concatenated_noisy_latents = torch.cat([x_noisy, source_encoded], dim=1)
 
-                # we only want to use epsilon parameterization
+                # We only want to use epsilon parameterization
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 else:
@@ -302,25 +302,32 @@ def main(
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
-                noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, timesteps)
+                # Compute the absolute difference for each pair in the batch
+                differences = torch.abs(torch.subtract(batch["edited_pixel_values"], batch["source_pixel_values"]))
+                differences = scale_images(differences, 32)
 
-                noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
+                # Calculate the mean difference across the color channels
+                mean_differences = differences.mean(dim=1)
 
-                loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
+                # Thresholding to create binary masks for each pair in the batch
+                threshold_value = 0.1  # Adjust as needed
+                ground_truth_mask = torch.where(mean_differences > threshold_value, 1.0, 0.0)
+                ground_truth_mask = ground_truth_mask.unsqueeze(1)
+                ground_truth_mask = ground_truth_mask.to(weight_dtype)
 
-                # def has_nan_or_inf(tensor):
-                #     return torch.isnan(tensor).any() or torch.isinf(tensor).any()
+                noise_tilde = None
+                noise_hat = None
+                if not train_args.joint_training:
+                    criterion = nn.CrossEntropyLoss()
+                    loss = criterion(mask, ground_truth_mask)
+                else:
+                    noise_tilde = (1.0 - ground_truth_mask) * noise
+                    noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
+                    loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
+                    loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
 
-                # print(f"MASK: {has_nan_or_inf(mask)}") # True
-                # print(f"NOISE_TILDE: {has_nan_or_inf(noise_tilde)}")
-                # print(f"NOISE_HAT: {has_nan_or_inf(noise_hat)}")
-                # print(f"MODEL_PRED: {has_nan_or_inf(model_pred)}")
-                # print(f"TARGET: {has_nan_or_inf(target.float())}")
-
-                loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
-
-                avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
-                train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
+                    avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
+                    train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
 
                 avg_loss = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
                 train_loss += avg_loss.item() / train_args.gradient_accumulation_steps
@@ -349,21 +356,24 @@ def main(
                 log_images = {
                     "edited_images": batch["edited_pixel_values"],
                     "source_images": batch["source_pixel_values"],
-                    "edited_noisy": scale_images(x_noisy),
-                    "source_noisy": scale_images(source_noisy),
-                    "source_encoded": scale_images(source_encoded),
-                    "noise": scale_images(noise),
-                    "noise_tilde": scale_images(noise_tilde),
-                    "noise_hat ": scale_images(noise_hat),
+                    "edited_noisy": scale_images(x_noisy, 32),
+                    "edited_encoded": scale_images(latents, 32),
+                    "source_noisy": scale_images(source_noisy, 32),
+                    "source_encoded": scale_images(source_encoded, 32),
+                    "noise": scale_images(noise, 32) if noise is not None else noise,
+                    "noise_tilde": noise_tilde,
+                    "noise_hat": scale_images(noise_hat, 32) if noise_hat is not None else noise_hat,
+                    "mask": scale_images(mask, 32),
+                    "ground_truth_mask": ground_truth_mask,
                 }
 
-                wandb_images = []
                 for k, tensor in log_images.items():
-                    wandb_img = wandb.Image(tensor, caption=k)
-                    wandb_images.append(wandb_img)
+                    if tensor is None:
+                        continue
+                    log_images[k] = [wandb.Image(tensor[i, :, :, :]) for i in range(tensor.shape[0])]
 
                 accelerator.log(
-                    {"train_loss": train_loss, "train_loss_ip2p": train_loss_ip2p, "training_images": wandb_images},
+                    {"train_loss": train_loss, "train_loss_ip2p": train_loss_ip2p, **log_images},
                     step=global_step,
                 )
                 train_loss_ip2p = 0.0

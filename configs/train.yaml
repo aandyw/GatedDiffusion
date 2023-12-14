@@ -19,10 +19,10 @@ train:
   mixed_precision: fp16
   gradient_accumulation_steps: 4
   gradient_checkpointing: True
-  checkpointing_steps: 50
+  checkpointing_steps: 100
 
   unet_learning_rate: 1e-6
-  mask_learning_rate: 1e-4 
+  mask_learning_rate: 1e-5
   lr_warmup_steps: 0
   lr_scheduler: constant
 
@@ -35,17 +35,16 @@ train:
 
   seed: 0
   resume_from_checkpoint:
-  # resume_from_checkpoint: GD_run_4/checkpoints/checkpoint-500
 
   # joint_training: True - training eps unet + mask unet
   # joint_training: False - freeze eps unet
-  joint_training: True
+  joint_training: False
 
 inference:
   # last - apply mask to last timestep
   # all - apply mask on all timesteps
   # both
   # none - no mask
-  method: last
+  method: both
   hard_mask: True
 

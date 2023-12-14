@@ -19,7 +19,7 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
 from models.mask_unet_model import MaskUNetModel
-from utils import extract_noise
+from utils import scale_images
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -326,6 +326,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
+        noise = torch.randn_like(latents)  # create noise
         masks = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -381,13 +382,13 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                         mask = mask_pred_image
 
                     if hard_mask:
-                        mask = (mask > 0.5).float()
+                        hard_mask_threshold = 0.5
+                        mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
 
-                    x_noisy = noise_scheduler.add_noise(latents, noise_hat, t.long())
                     source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
+                    source_noisy = noise_scheduler.add_noise(source_encoded, noise, t.long())
 
-                    noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, t)
-                    noise_hat = mask * noise_hat + (1.0 - mask) * noise_tilde
+                    noise_hat = mask * noise_hat + (1.0 - mask) * source_noisy
                     masks.append(mask)
 
                 # compute the previous noisy sample x_t -> x_t-1
@@ -425,15 +426,11 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
-        upsample = torch.nn.Upsample(size=(256, 256), mode="bilinear", align_corners=False)
-
         if masks:
             if len(masks) == 1:
-                masks = torch.mean(upsample(mask).view(-1, 256, 256), dim=0).unsqueeze(0).unsqueeze(0)
+                masks = scale_images(mask, 256).view(-1, 256, 256).unsqueeze(0)
             else:
-                masks = torch.stack(
-                    [torch.mean(upsample(m).view(-1, 256, 256), dim=0).unsqueeze(0) for m in masks], dim=0
-                )
+                masks = torch.stack([scale_images(m, 256).view(-1, 256, 256) for m in masks], dim=0)
             masks = self.image_processor.postprocess(masks)
 
         # Offload all models

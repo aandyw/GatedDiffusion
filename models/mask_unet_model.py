@@ -1158,6 +1158,7 @@ class MaskUNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
 
         # apply activation function
         mask = self.mask_act_fn_out(sample)
+        mask = torch.mean(mask, dim=1, keepdim=True)
 
         if USE_PEFT_BACKEND:
             # remove `lora_scale` from each PEFT layer

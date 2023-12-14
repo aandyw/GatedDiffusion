@@ -311,20 +311,23 @@ def main(
 
                 # Thresholding to create binary masks for each pair in the batch
                 threshold_value = 0.1  # Adjust as needed
-                ground_truth_mask = torch.where(mean_differences > threshold_value, 1, 0)
+                ground_truth_mask = torch.where(mean_differences > threshold_value, 1.0, 0.0)
                 ground_truth_mask = ground_truth_mask.unsqueeze(1)
                 ground_truth_mask = ground_truth_mask.to(weight_dtype)
 
-                # noise_tilde = extract_noise(noise_scheduler, x_noisy, source_encoded, timesteps)
-                noise_tilde = (1.0 - ground_truth_mask) * noise
-                noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
+                noise_tilde = None
+                noise_hat = None
+                if not train_args.joint_training:
+                    criterion = nn.CrossEntropyLoss()
+                    loss = criterion(mask, ground_truth_mask)
+                else:
+                    noise_tilde = (1.0 - ground_truth_mask) * noise
+                    noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
+                    loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
+                    loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
 
-                loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
-
-                loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
-
-                avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
-                train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
+                    avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
+                    train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
 
                 avg_loss = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
                 train_loss += avg_loss.item() / train_args.gradient_accumulation_steps
@@ -357,14 +360,16 @@ def main(
                     "edited_encoded": scale_images(latents, 32),
                     "source_noisy": scale_images(source_noisy, 32),
                     "source_encoded": scale_images(source_encoded, 32),
-                    "noise": scale_images(noise, 32),
+                    "noise": scale_images(noise, 32) if noise is not None else noise,
                     "noise_tilde": noise_tilde,
-                    "noise_hat": scale_images(noise_hat, 32),
+                    "noise_hat": scale_images(noise_hat, 32) if noise_hat is not None else noise_hat,
                     "mask": scale_images(mask, 32),
                     "ground_truth_mask": ground_truth_mask,
                 }
 
                 for k, tensor in log_images.items():
+                    if tensor is None:
+                        continue
                     log_images[k] = [wandb.Image(tensor[i, :, :, :]) for i in range(tensor.shape[0])]
 
                 accelerator.log(

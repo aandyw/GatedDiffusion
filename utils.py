@@ -5,8 +5,6 @@ from typing import List
 import torch
 import torch.nn.functional as F
 
-from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler
-
 
 def scale_images(images: torch.FloatTensor, image_size: int) -> torch.FloatTensor:
     scaled_images = F.interpolate(
@@ -19,11 +17,10 @@ def scale_images(images: torch.FloatTensor, image_size: int) -> torch.FloatTenso
 
 
 def visualize_all_masks(masks: List[torch.FloatTensor]):
-    widths, heights = zip(*(i.size for i in masks))
-    total_width = sum(widths)
-    max_height = max(heights)
+    total_width = 256 * len(masks)
+    max_height = 256
 
-    new_im = Image.new("RGB", (total_width, max_height))
+    new_im = Image.new("L", (total_width, max_height))
 
     x_offset = 0
     for im in masks:

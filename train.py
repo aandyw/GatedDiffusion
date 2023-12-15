@@ -22,13 +22,12 @@ from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler
 from diffusers.models import UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 
-import transformers
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel
 
 from data.dataset import MagicBrushDataset
 from models.mask_unet_model import MaskUNetModel
 from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
-from utils import scale_images, visualize_all_masks
+from utils import scale_images
 
 WANDB_TABLE_COL_NAMES = [
     "original_image",
@@ -356,14 +355,14 @@ def main(
                 log_images = {
                     "edited_images": batch["edited_pixel_values"],
                     "source_images": batch["source_pixel_values"],
-                    "edited_noisy": scale_images(x_noisy, 32),
-                    "edited_encoded": scale_images(latents, 32),
-                    "source_noisy": scale_images(source_noisy, 32),
-                    "source_encoded": scale_images(source_encoded, 32),
-                    "noise": scale_images(noise, 32) if noise is not None else noise,
+                    "edited_noisy": scale_images(x_noisy, 256),
+                    "edited_encoded": scale_images(latents, 256),
+                    "source_noisy": scale_images(source_noisy, 256),
+                    "source_encoded": scale_images(source_encoded, 256),
+                    "noise": scale_images(noise, 256) if noise is not None else noise,
                     "noise_tilde": noise_tilde,
-                    "noise_hat": scale_images(noise_hat, 32) if noise_hat is not None else noise_hat,
-                    "mask": scale_images(mask, 32),
+                    "noise_hat": scale_images(noise_hat, 256) if noise_hat is not None else noise_hat,
+                    "mask": scale_images(mask, 256),
                     "ground_truth_mask": ground_truth_mask,
                 }
 
@@ -435,7 +434,7 @@ def main(
                             hard_mask=config.inference.hard_mask,
                         )
                         edited_image = wandb.Image(result.images[0], caption=validation_prompt)
-                        masks = wandb.Image(visualize_all_masks(result.masks), caption=validation_prompt)
+                        masks = wandb.Image(result.masks, caption=validation_prompt)
                         val_images["edited_image_mask_all_timestep"].append(edited_image)
                         val_images["masks_all_timestep"].append(masks)
 

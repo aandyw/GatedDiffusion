@@ -6,11 +6,11 @@ import torch
 import torch.nn.functional as F
 
 
-def scale_images(images: torch.FloatTensor, image_size: int) -> torch.FloatTensor:
-    scaled_images = F.interpolate(
-        images.to(torch.float32),
+def scale_tensors(tensors: torch.FloatTensor, image_size: int) -> torch.FloatTensor:
+    scaled_tensors = F.interpolate(
+        tensors,
         size=(image_size, image_size),
         mode="bilinear",
         align_corners=False,
     )
-    return scaled_images
+    return scaled_tensors

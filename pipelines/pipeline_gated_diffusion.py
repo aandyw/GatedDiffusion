@@ -18,7 +18,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
 from models.mask_unet_model import MaskUNetModel
-from utils import scale_images
+from utils import scale_tensors
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -274,6 +274,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
         # 3. Preprocess image
         image = self.image_processor.preprocess(image)
+        source_image = image
 
         # 4. set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -371,7 +372,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                     noise_hat = (noise_hat - latents) / (-sigma)
 
                 # apply last mask
-                if method == "all" or (method == "last" and i == len(timesteps) - 1):
+                if method == "all":
                     mask = self.mask_unet(
                         scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
                     )[0]
@@ -423,13 +424,31 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         else:
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+        if method == "last":
+            # final timestep
+            latent_model_input = torch.cat([latents] * 3) if self.do_classifier_free_guidance else latents
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+            latent_model_input = torch.cat([latent_model_input, image_latents], dim=1)
 
-        if masks:
-            if len(masks) == 1:
-                masks = scale_images(mask, 256).view(-1, 256, 256).unsqueeze(0)
-            else:
-                masks = torch.stack([scale_images(m, 256).view(-1, 256, 256) for m in masks], dim=0)
+            mask = self.mask_unet(latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False)[0]
+
+            if self.do_classifier_free_guidance:
+                mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
+                mask = mask_pred_image
+
+            mask = scale_tensors(mask, 256)
+
+            if hard_mask:
+                hard_mask_threshold = 0.5
+                mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
+
+            image = mask * image + (1.0 - mask) * source_image.to(device, prompt_embeds.dtype)
+            masks = self.image_processor.postprocess(mask, output_type=output_type, do_denormalize=[False])
+
+        if len(masks) > 1:
+            masks = torch.stack([scale_tensors(m, 256).view(-1, 256, 256) for m in masks], dim=0)
+
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
         # Offload all models
         self.maybe_free_model_hooks()

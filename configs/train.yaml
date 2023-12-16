@@ -19,7 +19,7 @@ train:
   mixed_precision: fp16
   gradient_accumulation_steps: 4
   gradient_checkpointing: True
-  checkpointing_steps: 100
+  checkpointing_steps: 500
 
   unet_learning_rate: 1e-6
   mask_learning_rate: 1e-5

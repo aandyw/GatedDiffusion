@@ -27,7 +27,7 @@ from transformers import CLIPTextModel
 from data.dataset import MagicBrushDataset
 from models.mask_unet_model import MaskUNetModel
 from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
-from utils import scale_images
+from utils import scale_tensors
 
 WANDB_TABLE_COL_NAMES = [
     "original_image",
@@ -303,7 +303,7 @@ def main(
 
                 # Compute the absolute difference for each pair in the batch
                 differences = torch.abs(torch.subtract(batch["edited_pixel_values"], batch["source_pixel_values"]))
-                differences = scale_images(differences, 32)
+                differences = scale_tensors(differences, 32)
 
                 # Calculate the mean difference across the color channels
                 mean_differences = differences.mean(dim=1)
@@ -355,14 +355,14 @@ def main(
                 log_images = {
                     "edited_images": batch["edited_pixel_values"],
                     "source_images": batch["source_pixel_values"],
-                    "edited_noisy": scale_images(x_noisy, 256),
-                    "edited_encoded": scale_images(latents, 256),
-                    "source_noisy": scale_images(source_noisy, 256),
-                    "source_encoded": scale_images(source_encoded, 256),
-                    "noise": scale_images(noise, 256) if noise is not None else noise,
+                    "edited_noisy": scale_tensors(x_noisy, 256),
+                    "edited_encoded": scale_tensors(latents, 256),
+                    "source_noisy": scale_tensors(source_noisy, 256),
+                    "source_encoded": scale_tensors(source_encoded, 256),
+                    "noise": scale_tensors(noise, 256) if noise is not None else noise,
                     "noise_tilde": noise_tilde,
-                    "noise_hat": scale_images(noise_hat, 256) if noise_hat is not None else noise_hat,
-                    "mask": scale_images(mask, 256),
+                    "noise_hat": scale_tensors(noise_hat, 256) if noise_hat is not None else noise_hat,
+                    "mask": scale_tensors(mask, 256),
                     "ground_truth_mask": ground_truth_mask,
                 }
 
@@ -451,9 +451,9 @@ def main(
                             hard_mask=config.inference.hard_mask,
                         )
                         edited_image = wandb.Image(result.images[0], caption=validation_prompt)
-                        masks = wandb.Image(result.masks[0], caption=validation_prompt)
+                        mask = wandb.Image(result.masks[0], caption=validation_prompt)
                         val_images["edited_image_mask_last_timestep"].append(edited_image)
-                        val_images["masks_last_timestep"].append(masks)
+                        val_images["masks_last_timestep"].append(mask)
 
                     result = pipeline(
                         noise_scheduler=noise_scheduler,

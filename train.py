@@ -124,6 +124,7 @@ def main(
     vae = AutoencoderKL.from_pretrained(model_args.model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(model_args.model_path, subfolder="unet")
     mask_unet = MaskUNetModel.from_pretrained(model_args.model_path, subfolder="unet")
+    accelerator.register_for_checkpointing(mask_unet)
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
@@ -244,7 +245,7 @@ def main(
             train_args.resume_from_checkpoint = None
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(model_args.output_dir, path))
+            accelerator.load_state(path)
             global_step = int(path.split("-")[1])
 
             resume_global_step = global_step * train_args.gradient_accumulation_steps

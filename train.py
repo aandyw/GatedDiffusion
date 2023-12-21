@@ -398,6 +398,7 @@ def main(
                 model_args.model_path,
                 unet=accelerator.unwrap_model(unet),
                 mask_unet=accelerator.unwrap_model(mask_unet),
+                scheduler=noise_scheduler,
                 text_encoder=accelerator.unwrap_model(text_encoder),
                 vae=accelerator.unwrap_model(vae),
                 safety_checker=None,
@@ -423,7 +424,6 @@ def main(
 
                     if config.inference.method == "both" or config.inference.method == "all":
                         result = pipeline(
-                            noise_scheduler=noise_scheduler,
                             prompt=validation_prompt,
                             image=validation_image,
                             num_inference_steps=50,
@@ -440,7 +440,6 @@ def main(
 
                     if config.inference.method == "both" or config.inference.method == "last":
                         result = pipeline(
-                            noise_scheduler=noise_scheduler,
                             prompt=validation_prompt,
                             image=validation_image,
                             num_inference_steps=50,
@@ -456,7 +455,6 @@ def main(
                         val_images["masks_last_timestep"].append(mask)
 
                     result = pipeline(
-                        noise_scheduler=noise_scheduler,
                         prompt=validation_prompt,
                         image=validation_image,
                         num_inference_steps=50,
@@ -479,6 +477,7 @@ def main(
             model_args.model_path,
             unet=accelerator.unwrap_model(unet),
             mask_unet=accelerator.unwrap_model(mask_unet),
+            scheduler=noise_scheduler,
             text_encoder=accelerator.unwrap_model(text_encoder),
             vae=accelerator.unwrap_model(vae),
             safety_checker=None,

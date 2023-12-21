@@ -130,7 +130,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
     @torch.no_grad()
     def __call__(
         self,
-        noise_scheduler: DDPMScheduler,
         prompt: Union[str, List[str]] = None,
         image: PipelineImageInput = None,
         num_inference_steps: int = 100,
@@ -155,8 +154,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         The call function to the pipeline for generation.
 
         Args:
-            noise_scheduler (`DDPMScheduler`):
-                The noise scheduler to use.
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide image generation. If not defined, you need to pass `prompt_embeds`.
             image (`torch.FloatTensor` `np.ndarray`, `PIL.Image.Image`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
@@ -383,7 +380,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                         mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
 
                     source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
-                    source_noisy = noise_scheduler.add_noise(source_encoded, noise, t.long())
+                    source_noisy = self.scheduler.add_noise(source_encoded, noise, t.long())
 
                     noise_hat = mask * noise_hat + (1.0 - mask) * source_noisy
                     masks.append(mask)

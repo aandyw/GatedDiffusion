@@ -245,7 +245,7 @@ def main(
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
             accelerator.load_state(os.path.join(model_args.output_dir, path))
-            global_step = int(path.split("-")[1])
+            global_step = int(path.split("-")[-1])
 
             resume_global_step = global_step * train_args.gradient_accumulation_steps
             first_epoch = global_step // num_update_steps_per_epoch
@@ -426,7 +426,7 @@ def main(
                             noise_scheduler=noise_scheduler,
                             prompt=validation_prompt,
                             image=validation_image,
-                            num_inference_steps=20,
+                            num_inference_steps=50,
                             image_guidance_scale=1.5,
                             guidance_scale=7,
                             generator=generator,
@@ -434,7 +434,7 @@ def main(
                             hard_mask=config.inference.hard_mask,
                         )
                         edited_image = wandb.Image(result.images[0], caption=validation_prompt)
-                        masks = wandb.Image(result.masks, caption=validation_prompt)
+                        masks = wandb.Image(result.masks[0], caption=validation_prompt)
                         val_images["edited_image_mask_all_timestep"].append(edited_image)
                         val_images["masks_all_timestep"].append(masks)
 
@@ -443,7 +443,7 @@ def main(
                             noise_scheduler=noise_scheduler,
                             prompt=validation_prompt,
                             image=validation_image,
-                            num_inference_steps=20,
+                            num_inference_steps=50,
                             image_guidance_scale=1.5,
                             guidance_scale=7,
                             generator=generator,
@@ -459,7 +459,7 @@ def main(
                         noise_scheduler=noise_scheduler,
                         prompt=validation_prompt,
                         image=validation_image,
-                        num_inference_steps=20,
+                        num_inference_steps=50,
                         image_guidance_scale=1.5,
                         guidance_scale=7,
                         generator=generator,

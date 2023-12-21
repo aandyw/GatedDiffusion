@@ -22,7 +22,7 @@ train:
   checkpointing_steps: 500
 
   unet_learning_rate: 1e-6
-  mask_learning_rate: 1e-5
+  mask_learning_rate: 1e-4
   lr_warmup_steps: 0
   lr_scheduler: constant
 
@@ -41,7 +41,7 @@ train:
   joint_training: False
 
 inference:
-  # last - apply mask to last timestep
+  # last - apply mask after all timesteps
   # all - apply mask on all timesteps
   # both
   # none - no mask

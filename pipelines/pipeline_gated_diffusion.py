@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import inspect
 from typing import Callable, Dict, List, Optional, Union
+from PIL import Image
 
 import copy
 import numpy as np
@@ -111,8 +112,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 "Make sure to define a feature extractor when loading {self.__class__} if you want to use the safety"
                 " checker. If you do not want to use the safety checker, you can pass `'safety_checker=None'` instead."
             )
-
-        self.mask_unet = mask_unet
 
         self.register_modules(
             vae=vae,
@@ -373,9 +372,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
                 # apply last mask
                 if method == "all":
-                    mask = self.mask_unet(
-                        scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
-                    )[0]
+                    mask = self.mask_unet(scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds).mask
 
                     if self.do_classifier_free_guidance:
                         mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
@@ -430,7 +427,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
             latent_model_input = torch.cat([latent_model_input, image_latents], dim=1)
 
-            mask = self.mask_unet(latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False)[0]
+            mask = self.mask_unet(latent_model_input, t, encoder_hidden_states=prompt_embeds).mask
 
             if self.do_classifier_free_guidance:
                 mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
@@ -446,7 +443,17 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             masks = self.image_processor.postprocess(mask, output_type=output_type, do_denormalize=[False])
 
         if len(masks) > 1:
-            masks = torch.stack([scale_tensors(m, 256).view(-1, 256, 256) for m in masks], dim=0)
+            masks = [
+                self.image_processor.postprocess(
+                    scale_tensors(m, 256), output_type=output_type, do_denormalize=[False]
+                )[0]
+                for m in masks
+            ]
+            width, height = masks[0].size
+            all_masks = Image.new("RGB", (len(masks) * width, height))
+            for i, img in enumerate(masks):
+                all_masks.paste(img, (i * width, 0))
+            masks = [all_masks]
 
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 

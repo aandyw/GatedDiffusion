@@ -13,7 +13,7 @@ logging:
   wandb_project: gated-diffusion
 
 train:
-  num_epochs: 200
+  num_epochs: 1
   validation_epochs: 1
   batch_size: 8
   mixed_precision: fp16
@@ -34,6 +34,7 @@ train:
   max_grad_norm: 1.0
 
   seed: 0
+  # resume_from_checkpoint: GDv2_test/checkpoints/checkpoint-2
   resume_from_checkpoint:
 
   # joint_training: True - training eps unet + mask unet

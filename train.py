@@ -141,7 +141,10 @@ def main(
     def save_model_hook(models, weights, output_dir):
         if accelerator.is_main_process:
             for i, model in enumerate(models):
-                model.save_pretrained(os.path.join(output_dir, "unet"))
+                if isinstance(model, MaskUNetModel):
+                    model.save_pretrained(os.path.join(output_dir, "mask_unet"))
+                else:
+                    model.save_pretrained(os.path.join(output_dir, "unet"))
 
                 # make sure to pop weight so that corresponding model is not saved again
                 weights.pop()
@@ -151,8 +154,12 @@ def main(
             # pop models so that they are not loaded again
             model = models.pop()
 
-            # load diffusers style into model
-            load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
+            if isinstance(model, MaskUNetModel):
+                load_model = MaskUNetModel.from_pretrained(input_dir, subfolder="mask_unet")
+            else:
+                # load diffusers style into model
+                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
+
             model.register_to_config(**load_model.config)
 
             model.load_state_dict(load_model.state_dict())
@@ -235,7 +242,7 @@ def main(
     first_epoch = 0
 
     if train_args.resume_from_checkpoint:
-        path = os.path.join(model_args.output_dir, config.logging.dir, train_args.resume_from_checkpoint)
+        path = os.path.join(config.logging.dir, train_args.resume_from_checkpoint)
 
         if path is None:
             accelerator.print(

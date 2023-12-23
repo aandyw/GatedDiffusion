@@ -123,7 +123,7 @@ def main(
     text_encoder = CLIPTextModel.from_pretrained(model_args.model_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(model_args.model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(model_args.model_path, subfolder="unet")
-    mask_unet = MaskUNetModel.from_pretrained(model_args.model_path, subfolder="unet")
+    mask_unet = MaskUNetModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet")
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
@@ -304,7 +304,7 @@ def main(
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                mask = mask_unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).mask
+                mask = mask_unet(source_encoded, timesteps, encoder_hidden_states).mask
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
@@ -433,7 +433,7 @@ def main(
                         result = pipeline(
                             prompt=validation_prompt,
                             image=validation_image,
-                            num_inference_steps=50,
+                            num_inference_steps=20,
                             image_guidance_scale=1.5,
                             guidance_scale=7,
                             generator=generator,
@@ -449,7 +449,7 @@ def main(
                         result = pipeline(
                             prompt=validation_prompt,
                             image=validation_image,
-                            num_inference_steps=50,
+                            num_inference_steps=20,
                             image_guidance_scale=1.5,
                             guidance_scale=7,
                             generator=generator,
@@ -464,7 +464,7 @@ def main(
                     result = pipeline(
                         prompt=validation_prompt,
                         image=validation_image,
-                        num_inference_steps=50,
+                        num_inference_steps=20,
                         image_guidance_scale=1.5,
                         guidance_scale=7,
                         generator=generator,

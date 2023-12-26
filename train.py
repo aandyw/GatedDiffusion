@@ -123,7 +123,7 @@ def main(
     text_encoder = CLIPTextModel.from_pretrained(model_args.model_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(model_args.model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(model_args.model_path, subfolder="unet")
-    mask_unet = MaskUNetModel.from_pretrained(model_args.model_path, subfolder="unet")
+    mask_unet = MaskUNetModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet")
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
@@ -252,7 +252,7 @@ def main(
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
             accelerator.load_state(os.path.join(model_args.output_dir, path))
-            global_step = int(path.split("-")[1])
+            global_step = int(path.split("-")[-1])
 
             resume_global_step = global_step * train_args.gradient_accumulation_steps
             first_epoch = global_step // num_update_steps_per_epoch
@@ -304,7 +304,7 @@ def main(
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                mask = mask_unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).mask
+                mask = mask_unet(source_encoded, timesteps, encoder_hidden_states).mask
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
@@ -405,6 +405,7 @@ def main(
                 model_args.model_path,
                 unet=accelerator.unwrap_model(unet),
                 mask_unet=accelerator.unwrap_model(mask_unet),
+                scheduler=noise_scheduler,
                 text_encoder=accelerator.unwrap_model(text_encoder),
                 vae=accelerator.unwrap_model(vae),
                 safety_checker=None,
@@ -430,7 +431,6 @@ def main(
 
                     if config.inference.method == "both" or config.inference.method == "all":
                         result = pipeline(
-                            noise_scheduler=noise_scheduler,
                             prompt=validation_prompt,
                             image=validation_image,
                             num_inference_steps=20,
@@ -441,13 +441,12 @@ def main(
                             hard_mask=config.inference.hard_mask,
                         )
                         edited_image = wandb.Image(result.images[0], caption=validation_prompt)
-                        masks = wandb.Image(result.masks, caption=validation_prompt)
+                        masks = wandb.Image(result.masks[0], caption=validation_prompt)
                         val_images["edited_image_mask_all_timestep"].append(edited_image)
                         val_images["masks_all_timestep"].append(masks)
 
                     if config.inference.method == "both" or config.inference.method == "last":
                         result = pipeline(
-                            noise_scheduler=noise_scheduler,
                             prompt=validation_prompt,
                             image=validation_image,
                             num_inference_steps=20,
@@ -463,7 +462,6 @@ def main(
                         val_images["masks_last_timestep"].append(mask)
 
                     result = pipeline(
-                        noise_scheduler=noise_scheduler,
                         prompt=validation_prompt,
                         image=validation_image,
                         num_inference_steps=20,
@@ -486,6 +484,7 @@ def main(
             model_args.model_path,
             unet=accelerator.unwrap_model(unet),
             mask_unet=accelerator.unwrap_model(mask_unet),
+            scheduler=noise_scheduler,
             text_encoder=accelerator.unwrap_model(text_encoder),
             vae=accelerator.unwrap_model(vae),
             safety_checker=None,

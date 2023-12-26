@@ -280,6 +280,8 @@ def main(
 
             with accelerator.accumulate(models):
                 latents = vae.encode(batch["edited_pixel_values"].to(weight_dtype)).latent_dist.sample()
+                latents = latents * vae.config.scaling_factor
+
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
@@ -304,11 +306,12 @@ def main(
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                mask = mask_unet(source_encoded, timesteps, encoder_hidden_states).mask
+                mask = mask_unet(source_noisy, timesteps, encoder_hidden_states).mask
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
                 # Compute the absolute difference for each pair in the batch
+                # TODO: get differences using the provide mask_img in magicbrush dataset? masks provided are loose
                 differences = torch.abs(torch.subtract(batch["edited_pixel_values"], batch["source_pixel_values"]))
                 differences = scale_tensors(differences, 32)
 

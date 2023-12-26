@@ -375,13 +375,12 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
                 # apply last mask
                 if method == "all":
-                    mask = self.mask_unet(source_encoded, t, encoder_hidden_states=mask_prompt_embeds).mask
+                    source_noisy = self.scheduler.add_noise(source_encoded, noise, t.long())
+                    mask = self.mask_unet(source_noisy, t, encoder_hidden_states=mask_prompt_embeds).mask
 
                     if hard_mask:
                         hard_mask_threshold = 0.5
                         mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
-
-                    source_noisy = self.scheduler.add_noise(source_encoded, noise, t.long())
 
                     noise_hat = mask * noise_hat + (1.0 - mask) * source_noisy
                     masks.append(mask)

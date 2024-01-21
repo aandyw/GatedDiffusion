@@ -44,6 +44,7 @@ class GatedDiffusionPipelineOutput(BaseOutput):
     images: Union[List[PIL.Image.Image], np.ndarray]
     nsfw_content_detected: Optional[List[bool]]
     masks: Union[List[PIL.Image.Image], np.ndarray]
+    source_noisy_images: Union[List[PIL.Image.Image], np.ndarray]
 
 
 class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
@@ -90,7 +91,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
         mask_unet: MaskUNetModel,
-        scheduler: KarrasDiffusionSchedulers,
+        scheduler: DDPMScheduler,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
         requires_safety_checker: bool = True,
@@ -330,6 +331,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
         noise = torch.randn_like(latents)  # create noise
         masks = []
+        source_noisy_images = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             # for all timestep method, apply the mask unet once before the first iteration
             if method == "all":
@@ -387,14 +389,14 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                     if i == len(timesteps) - 1:
                         source_noisy = source_encoded
                     else:
-                        source_noisy = self.scheduler.add_noise(source_encoded, noise, (t + 1).long())
+                        source_noisy = self.scheduler.add_noise(source_encoded, noise, t.long())
                     # mask = self.mask_unet(source_noisy, t, encoder_hidden_states=mask_prompt_embeds).mask
 
                     # if hard_mask:
                     #     hard_mask_threshold = 0.5
                     #     mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
-
-                    latents = mask_all * latents + (1.0 - mask_all) * source_noisy
+                    latents = source_noisy
+                    source_noisy_images.append(source_noisy)
                     # masks.append(mask)
 
                 # compute the previous noisy sample x_t -> x_t-1
@@ -455,7 +457,21 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             masks = [all_masks]
 
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-
+        
+        if method == "all":
+            source_noisy_images = [
+                self.image_processor.postprocess(
+                    scale_tensors(s, 256), output_type=output_type, do_denormalize=[False]
+                    )[0] 
+                for s in source_noisy_images
+            ]
+            width, height = source_noisy_images[0].size
+            all_source_noisy = Image.new("RGB", (len(source_noisy_images) * width, height))
+            for i, img in enumerate(source_noisy_images):
+                all_source_noisy.paste(img, (i * width, 0))
+            source_noisy_images = [all_source_noisy]
+            
+    
         # Offload all models
         self.maybe_free_model_hooks()
 
@@ -466,6 +482,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             images=image,
             nsfw_content_detected=has_nsfw_concept,
             masks=masks,
+            source_noisy_images=source_noisy_images,
         )
 
     def _encode_prompt_for_mask(self, prompt, device):

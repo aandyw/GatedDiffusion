@@ -425,6 +425,7 @@ def main(
                 "edited_image_mask_last_timestep": [],
                 "masks_all_timestep": [],
                 "masks_last_timestep": [],
+                "source_noisy_images": [],
             }
             with torch.autocast(
                 str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
@@ -445,8 +446,10 @@ def main(
                         )
                         edited_image = wandb.Image(result.images[0], caption=validation_prompt)
                         masks = wandb.Image(result.masks[0], caption=validation_prompt)
+                        source_noisy_images = wandb.Image(result.source_noisy_images[0], caption=validation_prompt) 
                         val_images["edited_image_mask_all_timestep"].append(edited_image)
                         val_images["masks_all_timestep"].append(masks)
+                        val_images["source_noisy_images"].append(source_noisy_images)
 
                     if config.inference.method == "both" or config.inference.method == "last":
                         result = pipeline(

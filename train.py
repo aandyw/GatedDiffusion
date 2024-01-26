@@ -17,8 +17,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import diffusers
-from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler
+from diffusers import StableDiffusionDiffEditPipeline
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, DDIMInverseScheduler
 from diffusers.models import UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 
@@ -229,6 +229,12 @@ def main(
 
     total_batch_size = train_args.batch_size * accelerator.num_processes * train_args.gradient_accumulation_steps
 
+    inversed_latents_pipeline = StableDiffusionDiffEditPipeline.from_pretrained(
+        "stabilityai/stable-diffusion-2-1", torch_dtype=weight_dtype
+    )
+    inversed_latents_pipeline = inversed_latents_pipeline.to(accelerator.device)
+    inversed_latents_pipeline.inverse_scheduler = DDIMInverseScheduler.from_config(inversed_latents_pipeline.scheduler.config)
+
     logging.info("***** Running training *****")
     logging.info(f"  Num examples = {len(train_dataset)}")
     logging.info(f"  Num batches each epoch = {len(train_dataloader)}")
@@ -336,7 +342,11 @@ def main(
                     train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
                 else:
                     criterion = nn.BCELoss()
-                    loss = criterion(mask, ground_truth_mask.float())
+                    loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
+                    loss = criterion(mask, ground_truth_mask.float()) + loss_ip2p
+
+                    avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
+                    train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
 
                 avg_loss = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
                 train_loss += avg_loss.item() / train_args.gradient_accumulation_steps
@@ -408,8 +418,8 @@ def main(
                 model_args.model_path,
                 unet=accelerator.unwrap_model(unet),
                 mask_unet=accelerator.unwrap_model(mask_unet),
-                scheduler=noise_scheduler,
                 text_encoder=accelerator.unwrap_model(text_encoder),
+                inverse_scheduler=inversed_latents_pipeline,
                 vae=accelerator.unwrap_model(vae),
                 safety_checker=None,
                 torch_dtype=weight_dtype,
@@ -425,7 +435,6 @@ def main(
                 "edited_image_mask_last_timestep": [],
                 "masks_all_timestep": [],
                 "masks_last_timestep": [],
-                "source_noisy_images": [],
             }
             with torch.autocast(
                 str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
@@ -446,10 +455,8 @@ def main(
                         )
                         edited_image = wandb.Image(result.images[0], caption=validation_prompt)
                         masks = wandb.Image(result.masks[0], caption=validation_prompt)
-                        source_noisy_images = wandb.Image(result.source_noisy_images[0], caption=validation_prompt) 
                         val_images["edited_image_mask_all_timestep"].append(edited_image)
                         val_images["masks_all_timestep"].append(masks)
-                        val_images["source_noisy_images"].append(source_noisy_images)
 
                     if config.inference.method == "both" or config.inference.method == "last":
                         result = pipeline(
@@ -490,8 +497,8 @@ def main(
             model_args.model_path,
             unet=accelerator.unwrap_model(unet),
             mask_unet=accelerator.unwrap_model(mask_unet),
-            scheduler=noise_scheduler,
             text_encoder=accelerator.unwrap_model(text_encoder),
+            inverse_scheduler=inversed_latents_pipeline,
             vae=accelerator.unwrap_model(vae),
             safety_checker=None,
             torch_dtype=weight_dtype,

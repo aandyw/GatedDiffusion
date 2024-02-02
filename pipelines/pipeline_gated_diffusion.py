@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import inspect
 from typing import Callable, Dict, List, Optional, Union
+from PIL import Image
 
 import copy
 import numpy as np
@@ -11,7 +12,7 @@ from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
 from diffusers.loaders import LoraLoaderMixin, TextualInversionLoaderMixin
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
-from diffusers.schedulers import KarrasDiffusionSchedulers, DDPMScheduler
+from diffusers.schedulers import KarrasDiffusionSchedulers, DDPMScheduler, DDIMScheduler, DDIMInverseScheduler
 from diffusers.utils import PIL_INTERPOLATION, deprecate, logging, BaseOutput
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -43,6 +44,7 @@ class GatedDiffusionPipelineOutput(BaseOutput):
     images: Union[List[PIL.Image.Image], np.ndarray]
     nsfw_content_detected: Optional[List[bool]]
     masks: Union[List[PIL.Image.Image], np.ndarray]
+    source_noisy_images: Union[List[PIL.Image.Image], np.ndarray]
 
 
 class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
@@ -90,6 +92,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         unet: UNet2DConditionModel,
         mask_unet: MaskUNetModel,
         scheduler: KarrasDiffusionSchedulers,
+        inverse_scheduler: DDIMInverseScheduler,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
         requires_safety_checker: bool = True,
@@ -112,8 +115,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 " checker. If you do not want to use the safety checker, you can pass `'safety_checker=None'` instead."
             )
 
-        self.mask_unet = mask_unet
-
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -121,6 +122,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             unet=unet,
             mask_unet=mask_unet,
             scheduler=scheduler,
+            inverse_scheduler=inverse_scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
         )
@@ -131,7 +133,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
     @torch.no_grad()
     def __call__(
         self,
-        noise_scheduler: DDPMScheduler,
         prompt: Union[str, List[str]] = None,
         image: PipelineImageInput = None,
         num_inference_steps: int = 100,
@@ -156,8 +157,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         The call function to the pipeline for generation.
 
         Args:
-            noise_scheduler (`DDPMScheduler`):
-                The noise scheduler to use.
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide image generation. If not defined, you need to pass `prompt_embeds`.
             image (`torch.FloatTensor` `np.ndarray`, `PIL.Image.Image`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
@@ -272,6 +271,11 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             negative_prompt_embeds=negative_prompt_embeds,
         )
 
+        mask_prompt_embeds = self._encode_prompt_for_mask(
+            prompt,
+            device,
+        )
+
         # 3. Preprocess image
         image = self.image_processor.preprocess(image)
         source_image = image
@@ -326,7 +330,14 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
-        noise = torch.randn_like(latents)  # create noise
+        # create inverse image latents from source image
+        inverse_image_latents = self.inverse_scheduler.invert(
+            image=image, prompt=prompt, inpaint_strength=1, num_inference_steps=num_inference_steps
+        ).latents[0]
+
+        assert len(inverse_image_latents) == num_inference_steps
+
+        source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
         masks = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -373,22 +384,14 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
                 # apply last mask
                 if method == "all":
-                    mask = self.mask_unet(
-                        scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
-                    )[0]
-
-                    if self.do_classifier_free_guidance:
-                        mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
-                        mask = mask_pred_image
+                    source_noisy = inverse_image_latents[i].unsqueeze(0)
+                    mask = self.mask_unet(source_noisy, t, encoder_hidden_states=mask_prompt_embeds).mask
 
                     if hard_mask:
                         hard_mask_threshold = 0.5
                         mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
 
-                    source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
-                    source_noisy = noise_scheduler.add_noise(source_encoded, noise, t.long())
-
-                    noise_hat = mask * noise_hat + (1.0 - mask) * source_noisy
+                    latents = mask * latents + (1.0 - mask) * source_noisy
                     masks.append(mask)
 
                 # compute the previous noisy sample x_t -> x_t-1
@@ -425,28 +428,28 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
         if method == "last":
-            # final timestep
-            latent_model_input = torch.cat([latents] * 3) if self.do_classifier_free_guidance else latents
-            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-            latent_model_input = torch.cat([latent_model_input, image_latents], dim=1)
-
-            mask = self.mask_unet(latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False)[0]
-
-            if self.do_classifier_free_guidance:
-                mask_pred_text, mask_pred_image, mask_pred_uncond = mask.chunk(3)
-                mask = mask_pred_image
-
+            mask = self.mask_unet(source_encoded, t, encoder_hidden_states=mask_prompt_embeds).mask
             mask = scale_tensors(mask, 256)
 
             if hard_mask:
                 hard_mask_threshold = 0.5
                 mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
 
-            image = mask * image + (1.0 - mask) * source_image.to(device, prompt_embeds.dtype)
+            image = mask * image + (1.0 - mask) * source_image.to(device, mask_prompt_embeds.dtype)
             masks = self.image_processor.postprocess(mask, output_type=output_type, do_denormalize=[False])
 
         if len(masks) > 1:
-            masks = torch.stack([scale_tensors(m, 256).view(-1, 256, 256) for m in masks], dim=0)
+            masks = [
+                self.image_processor.postprocess(
+                    scale_tensors(m, 256), output_type=output_type, do_denormalize=[False]
+                )[0]
+                for m in masks
+            ]
+            width, height = masks[0].size
+            all_masks = Image.new("RGB", (len(masks) * width, height))
+            for i, img in enumerate(masks):
+                all_masks.paste(img, (i * width, 0))
+            masks = [all_masks]
 
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
@@ -460,7 +463,19 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             images=image,
             nsfw_content_detected=has_nsfw_concept,
             masks=masks,
+            source_noisy_images=[],
         )
+
+    def _encode_prompt_for_mask(self, prompt, device):
+        tokenized_prompt = self.tokenizer(
+            prompt,
+            max_length=self.tokenizer.model_max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        ).input_ids
+        encoder_hidden_states = self.text_encoder(tokenized_prompt.to(device))[0]
+        return encoder_hidden_states
 
     def _encode_prompt(
         self,

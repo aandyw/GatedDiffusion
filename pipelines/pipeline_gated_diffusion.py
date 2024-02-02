@@ -384,7 +384,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
                 # apply last mask
                 if method == "all":
-                    source_noisy = inverse_image_latents[i]
+                    source_noisy = inverse_image_latents[i].unsqueeze(0)
                     mask = self.mask_unet(source_noisy, t, encoder_hidden_states=mask_prompt_embeds).mask
 
                     if hard_mask:

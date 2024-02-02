@@ -331,22 +331,15 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         self._num_timesteps = len(timesteps)
 
         # create inverse image latents from source image
-        inverse_image_latents = self.inverse_scheduler.invert(image=image, prompt=prompt).latents[0]
+        inverse_image_latents = self.inverse_scheduler.invert(
+            image=image, prompt=prompt, inpaint_strength=1, num_inference_steps=num_inference_steps
+        ).latents[0]
+
+        assert len(inverse_image_latents) == num_inference_steps
 
         source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
         masks = []
-        source_noisy_images = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            # for all timestep method, apply the mask unet once before the first iteration
-            if method == "all":
-                mask_all = self.mask_unet(source_encoded, timesteps[-1], encoder_hidden_states=mask_prompt_embeds).mask
-
-                if hard_mask:
-                    hard_mask_threshold = 0.5
-                    mask_all = torch.where(mask_all > hard_mask_threshold, 1.0, 0.0)
-
-                masks = self.image_processor.postprocess(mask_all, output_type=output_type, do_denormalize=[False])
-
             for i, t in enumerate(timesteps):
                 # Expand the latents if we are doing classifier free guidance.
                 # The latents are expanded 3 times because for pix2pix the guidance\
@@ -391,18 +384,15 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
                 # apply last mask
                 if method == "all":
-                    # if i == len(timesteps) - 1:
-                    #     source_noisy = source_encoded
-                    # else:
-                    #     source_noisy = self.scheduler.add_noise(source_encoded, latents, t.long())
-                    # mask = self.mask_unet(source_noisy, t, encoder_hidden_states=mask_prompt_embeds).mask
+                    source_noisy = inverse_image_latents[i]
+                    mask = self.mask_unet(source_noisy, t, encoder_hidden_states=mask_prompt_embeds).mask
 
-                    # if hard_mask:
-                    #     hard_mask_threshold = 0.5
-                    #     mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
-                    latents = mask_all * latents + (1.0 - mask_all) * inverse_image_latents[i]
-                    # source_noisy_images.append(source_noisy)
-                    # masks.append(mask)
+                    if hard_mask:
+                        hard_mask_threshold = 0.5
+                        mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
+
+                    latents = mask * latents + (1.0 - mask) * source_noisy
+                    masks.append(mask)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_hat, t, latents, **extra_step_kwargs, return_dict=False)[0]
@@ -462,19 +452,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             masks = [all_masks]
 
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-
-        # if method == "all":
-        #     source_noisy_images = [
-        #         self.image_processor.postprocess(
-        #             scale_tensors(s, 256), output_type=output_type, do_denormalize=[False]
-        #         )[0]
-        #         for s in source_noisy_images
-        #     ]
-        #     width, height = source_noisy_images[0].size
-        #     all_source_noisy = Image.new("RGB", (len(source_noisy_images) * width, height))
-        #     for i, img in enumerate(source_noisy_images):
-        #         all_source_noisy.paste(img, (i * width, 0))
-        #     source_noisy_images = [all_source_noisy]
 
         # Offload all models
         self.maybe_free_model_hooks()

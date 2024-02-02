@@ -230,10 +230,12 @@ def main(
     total_batch_size = train_args.batch_size * accelerator.num_processes * train_args.gradient_accumulation_steps
 
     inversed_latents_pipeline = StableDiffusionDiffEditPipeline.from_pretrained(
-        "stabilityai/stable-diffusion-2-1", torch_dtype=weight_dtype
+        "runwayml/stable-diffusion-v1-5", torch_dtype=weight_dtype
     )
     inversed_latents_pipeline = inversed_latents_pipeline.to(accelerator.device)
-    inversed_latents_pipeline.inverse_scheduler = DDIMInverseScheduler.from_config(inversed_latents_pipeline.scheduler.config)
+    inversed_latents_pipeline.inverse_scheduler = DDIMInverseScheduler.from_config(
+        inversed_latents_pipeline.scheduler.config
+    )
 
     logging.info("***** Running training *****")
     logging.info(f"  Num examples = {len(train_dataset)}")

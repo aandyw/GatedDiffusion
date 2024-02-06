@@ -1,3 +1,5 @@
+# modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_instruct_pix2pix
+
 from dataclasses import dataclass
 import inspect
 from typing import Callable, Dict, List, Optional, Union
@@ -23,9 +25,6 @@ from utils import scale_tensors
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
-
-# modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_instruct_pix2pix.StableDiffusionInstructPix2PixPipeline
-
 
 @dataclass
 class GatedDiffusionPipelineOutput(BaseOutput):

@@ -182,8 +182,19 @@ def main(
         eps=train_args.adam_epsilon,
     )
 
+    # Freeze the mask unet encoder layers
+    for name, param in mask_unet.named_parameters():
+        if name.startswith("down_blocks") or name.startswith("mid_block"):
+            param.requires_grad = False
+
+    # Check
+    for name, param in mask_unet.named_parameters():
+        if name.startswith("down_blocks") or name.startswith("mid_block"):
+            assert not param.requires_grad, f"Layer {name} was not frozen."
+
+    mask_unet_trainable_params = filter(lambda param: param.requires_grad, mask_unet.parameters())
     mask_optimizer = torch.optim.AdamW(
-        mask_unet.parameters(),
+        mask_unet_trainable_params,
         lr=train_args.mask_learning_rate,
         betas=(train_args.adam_beta1, train_args.adam_beta2),
         weight_decay=train_args.adam_weight_decay,

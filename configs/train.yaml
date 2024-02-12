@@ -46,6 +46,6 @@ inference:
   # all - apply mask on all timesteps
   # both
   # none - no mask
-  method: both
+  method: all
   hard_mask: True
 

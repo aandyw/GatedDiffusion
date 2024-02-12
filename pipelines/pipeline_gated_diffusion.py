@@ -26,6 +26,7 @@ from utils import scale_tensors
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+
 @dataclass
 class GatedDiffusionPipelineOutput(BaseOutput):
     """
@@ -313,7 +314,8 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
         # 7. Check that shapes of latents, image, and mask match the UNet channels
         num_channels_image = image_latents.shape[1]
-        if num_channels_latents + num_channels_image != self.unet.config.in_channels:
+        num_channels_mask = self.mask_unet.config.out_channels
+        if num_channels_latents + num_channels_image + num_channels_mask != self.unet.config.in_channels:
             raise ValueError(
                 f"Incorrect configuration settings! The config of `pipeline.unet`: {self.unet.config} expects"
                 f" {self.unet.config.in_channels} but received `num_channels_latents`: {num_channels_latents} +"
@@ -339,6 +341,22 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
         masks = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
+            # for all timestep method, apply the mask unet once before the first iteration
+            if method == "all":
+                mask = self.mask_unet(
+                    source_encoded, num_inference_steps // 2, encoder_hidden_states=mask_prompt_embeds
+                ).mask
+
+                if hard_mask:
+                    hard_mask_threshold = 0.5
+                    mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
+
+                masks.append(mask)
+
+            elif method == "none":  # create mask of one (use all ip2p edits)
+                mask = torch.ones_like(latents)
+                masks.append(mask)
+
             for i, t in enumerate(timesteps):
                 # Expand the latents if we are doing classifier free guidance.
                 # The latents are expanded 3 times because for pix2pix the guidance\
@@ -347,7 +365,11 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
                 # concat latents, image_latents in the channel dimension
                 scaled_latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-                scaled_latent_model_input = torch.cat([scaled_latent_model_input, image_latents], dim=1)
+
+                # resize mask to have correct dims
+                mask_input = mask.repeat(1, scaled_latent_model_input.shape[1], 1, 1).squeeze(0)
+                mask_input = torch.stack([mask_input for _ in range(scaled_latent_model_input.shape[0])])
+                scaled_latent_model_input = torch.cat([scaled_latent_model_input, image_latents, mask_input], dim=1)
 
                 # predict the noise residual
                 noise_hat = self.unet(
@@ -381,17 +403,17 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 if scheduler_is_in_sigma_space:
                     noise_hat = (noise_hat - latents) / (-sigma)
 
-                # apply last mask
-                if method == "all":
-                    source_noisy = inverse_image_latents[i].unsqueeze(0)
-                    mask = self.mask_unet(source_noisy, t, encoder_hidden_states=mask_prompt_embeds).mask
+                # apply first mask
+                # if method == "all":
+                #     source_noisy = inverse_image_latents[i].unsqueeze(0)
+                # mask = self.mask_unet(source_noisy, t, encoder_hidden_states=mask_prompt_embeds).mask
 
-                    if hard_mask:
-                        hard_mask_threshold = 0.5
-                        mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
+                # if hard_mask:
+                #     hard_mask_threshold = 0.5
+                #     mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
 
-                    latents = mask * latents + (1.0 - mask) * source_noisy
-                    masks.append(mask)
+                # latents = mask * latents + (1.0 - mask) * source_noisy
+                # masks.append(mask)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_hat, t, latents, **extra_step_kwargs, return_dict=False)[0]

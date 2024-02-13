@@ -1,5 +1,5 @@
 model:
-  output_dir: data/gated_diffusion/
+  output_dir: /data/gated_diffusion/
   model_path: timbrooks/instruct-pix2pix
   mask:
     act_fn: sigmoid
@@ -35,11 +35,11 @@ train:
 
   seed: 0
   # resume_from_checkpoint: GD/checkpoints/checkpoint-2
-  resume_from_checkpoint: train_epsilon/checkpoints/checkpoint-690
+  resume_from_checkpoint:
 
   # joint_training: True - training eps unet + mask unet
   # joint_training: False - freeze eps unet
-  train_mask: False
+  train_mask: True
   train_epsilon: True
 
 inference:

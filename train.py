@@ -370,12 +370,6 @@ def main(
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
-                # Concatenate the `source_encoded`, `x_noisy`, `mask`.
-                mask_input = ground_truth_mask.repeat(1, x_noisy.shape[1], 1, 1)
-                concatenated_noisy_latents = torch.cat([x_noisy, source_encoded, mask_input], dim=1)
-
-                model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
-
                 noise_tilde = None
                 noise_hat = None
                 # if train_args.joint_training:

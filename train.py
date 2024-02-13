@@ -340,12 +340,6 @@ def main(
 
                 mask = mask_unet(source_noisy, mid_timesteps, encoder_hidden_states).mask
 
-                # Concatenate the `source_encoded`, `x_noisy`, `mask`.
-                mask_input = mask.repeat(1, x_noisy.shape[1], 1, 1)
-                concatenated_noisy_latents = torch.cat([x_noisy, source_encoded, mask_input], dim=1)
-
-                model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
-
                 # Compute the absolute difference for each pair in the batch
                 # TODO: get differences using the provide mask_img in magicbrush dataset? masks provided are loose
                 differences = torch.abs(torch.subtract(batch["edited_pixel_values"], batch["source_pixel_values"]))
@@ -359,6 +353,12 @@ def main(
                 ground_truth_mask = torch.where(mean_differences > threshold_value, 1.0, 0.0)
                 ground_truth_mask = ground_truth_mask.unsqueeze(1)
                 ground_truth_mask = ground_truth_mask.to(weight_dtype)
+
+                # Concatenate the `source_encoded`, `x_noisy`, `mask`.
+                mask_input = ground_truth_mask.repeat(1, x_noisy.shape[1], 1, 1)
+                concatenated_noisy_latents = torch.cat([x_noisy, source_encoded, mask_input], dim=1)
+
+                model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
 
                 noise_tilde = None
                 noise_hat = None

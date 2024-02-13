@@ -29,6 +29,8 @@ from models.mask_unet_model import MaskUNetModel
 from pipelines.pipeline_gated_diffusion import GatedDiffusionPipeline
 from utils import scale_tensors
 
+import math
+
 WANDB_TABLE_COL_NAMES = [
     "original_image",
     "edited_image",
@@ -126,7 +128,7 @@ def main(
     mask_unet = MaskUNetModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet")
 
     logging.info("Initializing the InstructPix2Pix UNet from the pretrained UNet.")
-    in_channels = 12
+    in_channels = 9
     out_channels = unet.conv_in.out_channels
     unet.register_to_config(in_channels=in_channels)
 
@@ -142,13 +144,26 @@ def main(
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
 
-    if not train_args.joint_training:
+    if not train_args.train_mask:
+        mask_unet.requires_grad_(False)
+    if not train_args.train_epsilon:
         unet.requires_grad_(False)
 
     if train_args.gradient_checkpointing:
-        if train_args.joint_training:
+        if train_args.train_epsilon:
             unet.enable_gradient_checkpointing()
-        mask_unet.enable_gradient_checkpointing()
+        if train_args.train_epsilon:
+            mask_unet.enable_gradient_checkpointing()
+
+    # Freeze the mask unet encoder layers
+    for name, param in mask_unet.named_parameters():
+        if name.startswith("down_blocks"):
+            param.requires_grad = False
+
+    # Check
+    for name, param in mask_unet.named_parameters():
+        if name.startswith("down_blocks"):
+            assert not param.requires_grad, f"Layer {name} was not frozen."
 
     # create hooks for saving and loading model
     def save_model_hook(models, weights, output_dir):
@@ -194,16 +209,6 @@ def main(
         weight_decay=train_args.adam_weight_decay,
         eps=train_args.adam_epsilon,
     )
-
-    # Freeze the mask unet encoder layers
-    for name, param in mask_unet.named_parameters():
-        if name.startswith("down_blocks"):
-            param.requires_grad = False
-
-    # Check
-    for name, param in mask_unet.named_parameters():
-        if name.startswith("down_blocks"):
-            assert not param.requires_grad, f"Layer {name} was not frozen."
 
     mask_unet_trainable_params = filter(lambda param: param.requires_grad, mask_unet.parameters())
     mask_optimizer = torch.optim.AdamW(
@@ -294,10 +299,12 @@ def main(
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, train_args.num_epochs):
-        models = [mask_unet]
-        mask_unet.train()
+        models = []
+        if train_args.train_mask:
+            mask_unet.train()
+            models.append(mask_unet)
 
-        if train_args.joint_training:
+        if train_args.train_epsilon:
             unet.train()
             models.append(unet)
 
@@ -319,6 +326,10 @@ def main(
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
+                timesteps_source_noisy = math.floor(noise_scheduler.config.num_train_timesteps / 2)
+                timesteps_source_noisy = torch.full((bsz,), timesteps_source_noisy, device=latents.device)
+                timesteps_source_noisy = timesteps_source_noisy.long()
+
                 mid_timesteps = torch.full((bsz,), noise_scheduler.config.num_train_timesteps // 2)
                 mid_timesteps = mid_timesteps.long()
 
@@ -330,15 +341,7 @@ def main(
 
                 # original_image_embed
                 source_encoded = vae.encode(batch["source_pixel_values"].to(weight_dtype)).latent_dist.mode()
-                source_noisy = noise_scheduler.add_noise(source_encoded, noise, mid_timesteps)
-
-                # We only want to use epsilon parameterization
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-
-                mask = mask_unet(source_noisy, mid_timesteps, encoder_hidden_states).mask
+                source_noisy = noise_scheduler.add_noise(source_encoded, noise, timesteps_source_noisy)
 
                 # Compute the absolute difference for each pair in the batch
                 # TODO: get differences using the provide mask_img in magicbrush dataset? masks provided are loose
@@ -354,6 +357,19 @@ def main(
                 ground_truth_mask = ground_truth_mask.unsqueeze(1)
                 ground_truth_mask = ground_truth_mask.to(weight_dtype)
 
+                # Concatenate the `source_encoded` with the `x_noisy`.
+                concatenated_noisy_latents = torch.cat([x_noisy, source_encoded, ground_truth_mask], dim=1)
+
+                # We only want to use epsilon parameterization
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
+                mask = mask_unet(source_noisy, timesteps_source_noisy, encoder_hidden_states).mask
+
+                model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
+
                 # Concatenate the `source_encoded`, `x_noisy`, `mask`.
                 mask_input = ground_truth_mask.repeat(1, x_noisy.shape[1], 1, 1)
                 concatenated_noisy_latents = torch.cat([x_noisy, source_encoded, mask_input], dim=1)
@@ -362,37 +378,42 @@ def main(
 
                 noise_tilde = None
                 noise_hat = None
-                if train_args.joint_training:
-                    noise_tilde = (1.0 - ground_truth_mask) * noise
-                    noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
-                    loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
-                    loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
+                # if train_args.joint_training:
+                #     noise_tilde = (1.0 - ground_truth_mask) * noise
+                #     noise_hat = mask * model_pred + (1.0 - mask) * noise_tilde
+                #     loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
+                #     loss = F.mse_loss(noise_hat, target.float(), reduction="mean") + loss_ip2p
 
-                    avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
-                    train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
-                else:
+                #     avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
+                #     train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
+                if train_args.train_mask:
                     criterion = nn.BCELoss()
                     loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
                     loss = criterion(mask, ground_truth_mask.float()) + loss_ip2p
 
                     avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
                     train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
+                elif train_args.train_epsilon:
+                    loss = F.mse_loss(model_pred, target.float(), reduction="mean")
 
                 avg_loss = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
                 train_loss += avg_loss.item() / train_args.gradient_accumulation_steps
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params = list(mask_unet.parameters())
-                    if train_args.joint_training:
+                    params = []
+                    if train_args.train_mask:
+                        params += list(mask_unet.parameters())
+                    if train_args.train_epsilon:
                         params += list(unet.parameters())
                     accelerator.clip_grad_norm_(params, train_args.max_grad_norm)
 
-                mask_optimizer.step()
-                mask_lr_scheduler.step()
-                mask_optimizer.zero_grad()
+                if train_args.train_mask:
+                    mask_optimizer.step()
+                    mask_lr_scheduler.step()
+                    mask_optimizer.zero_grad()
 
-                if train_args.joint_training:
+                if train_args.train_epsilon:
                     unet_optimizer.step()
                     unet_lr_scheduler.step()
                     unet_optimizer.zero_grad()

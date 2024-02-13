@@ -1,5 +1,5 @@
 model:
-  output_dir: /data/gated_diffusion/
+  output_dir: data/gated_diffusion/
   model_path: timbrooks/instruct-pix2pix
   mask:
     act_fn: sigmoid
@@ -19,7 +19,7 @@ train:
   mixed_precision: fp16
   gradient_accumulation_steps: 4
   gradient_checkpointing: True
-  checkpointing_steps: 500
+  checkpointing_steps: 138
 
   unet_learning_rate: 1e-6
   mask_learning_rate: 1e-5
@@ -35,11 +35,12 @@ train:
 
   seed: 0
   # resume_from_checkpoint: GD/checkpoints/checkpoint-2
-  resume_from_checkpoint:
+  resume_from_checkpoint: train_epsilon/checkpoints/checkpoint-690
 
   # joint_training: True - training eps unet + mask unet
   # joint_training: False - freeze eps unet
-  joint_training: False
+  train_mask: False
+  train_epsilon: True
 
 inference:
   # last - apply mask after all timesteps

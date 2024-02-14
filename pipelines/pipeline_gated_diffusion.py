@@ -317,7 +317,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         # 7. Check that shapes of latents, image, and mask match the UNet channels
         num_channels_image = image_latents.shape[1]
 
-        num_channels_mask = self.mask_unet.config.out_channels
+        num_channels_mask = 1
         if num_channels_latents + num_channels_image + num_channels_mask != self.unet.config.in_channels:
 
             raise ValueError(

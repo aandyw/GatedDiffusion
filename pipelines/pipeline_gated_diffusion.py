@@ -1,5 +1,3 @@
-# modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_instruct_pix2pix
-
 from dataclasses import dataclass
 import inspect
 from typing import Callable, Dict, List, Optional, Union
@@ -27,6 +25,8 @@ import math
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+# modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_instruct_pix2pix.StableDiffusionInstructPix2PixPipeline
 
 
 @dataclass
@@ -316,10 +316,7 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
         # 7. Check that shapes of latents, image, and mask match the UNet channels
         num_channels_image = image_latents.shape[1]
-
-        num_channels_mask = 1
-        if num_channels_latents + num_channels_image + num_channels_mask != self.unet.config.in_channels:
-
+        if num_channels_latents + num_channels_image + 1 != self.unet.config.in_channels:
             raise ValueError(
                 f"Incorrect configuration settings! The config of `pipeline.unet`: {self.unet.config} expects"
                 f" {self.unet.config.in_channels} but received `num_channels_latents`: {num_channels_latents} +"
@@ -344,11 +341,9 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
         source_encoded = self.vae.encode(image.to(device, prompt_embeds.dtype)).latent_dist.mode()
         masks = []
-        noise = torch.randn_like(latents)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-
             # generate source_noisy at time T//2
-            mid_timestep = timesteps[self._num_timesteps // 2]
+            mid_timestep = timesteps[self._num_timesteps//2]
             mid_timestep = torch.full((latents.shape[0],), mid_timestep, device=latents.device)
             noise = torch.randn_like(latents)
             source_noisy = self.scheduler.add_noise(source_encoded, noise, mid_timestep)
@@ -358,7 +353,6 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
             input_mask = torch.cat([mask] * 3)
             masks.append(mask)
-
             for i, t in enumerate(timesteps):
                 # Expand the latents if we are doing classifier free guidance.
                 # The latents are expanded 3 times because for pix2pix the guidance\
@@ -401,14 +395,14 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 if scheduler_is_in_sigma_space:
                     noise_hat = (noise_hat - latents) / (-sigma)
 
-                # apply first mask
+                # apply last mask
                 if method == "all":
-                    # source_noisy = inverse_image_latents[i].unsqueeze(0)
-                    # mask = self.mask_unet(source_noisy_all, mid_timestep, encoder_hidden_states=mask_prompt_embeds).mask
+                    #source_noisy = inverse_image_latents[i].unsqueeze(0)
+                    #mask = self.mask_unet(source_noisy_all, mid_timestep, encoder_hidden_states=mask_prompt_embeds).mask
 
                     source_noisy_t = inverse_image_latents[i]
                     latents = mask * latents + (1.0 - mask) * source_noisy_t
-                    # masks.append(mask)
+                    #masks.append(mask)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_hat, t, latents, **extra_step_kwargs, return_dict=False)[0]

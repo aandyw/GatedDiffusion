@@ -39,14 +39,14 @@ train:
 
   # joint_training: True - training eps unet + mask unet
   # joint_training: False - freeze eps unet
+  joint_training: False
   train_mask: True
-  train_epsilon: True
+  train_epsilon: False
 
 inference:
   # last - apply mask after all timesteps
   # all - apply mask on all timesteps
   # both
   # none - no mask
-  method: all
+  method: both
   hard_mask: True
-

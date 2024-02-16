@@ -127,7 +127,6 @@ def main(
     unet = UNet2DConditionModel.from_pretrained(model_args.model_path, subfolder="unet")
     mask_unet = MaskUNetModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet")
 
-    logging.info("Initializing the InstructPix2Pix UNet from the pretrained UNet.")
     in_channels = 9
     out_channels = unet.conv_in.out_channels
     unet.register_to_config(in_channels=in_channels)
@@ -155,15 +154,15 @@ def main(
         if train_args.train_epsilon:
             mask_unet.enable_gradient_checkpointing()
 
-    # Freeze the mask unet encoder layers
-    for name, param in mask_unet.named_parameters():
-        if name.startswith("down_blocks"):
-            param.requires_grad = False
+    # # Freeze the mask unet encoder layers
+    # for name, param in mask_unet.named_parameters():
+    #     if name.startswith("down_blocks"):
+    #         param.requires_grad = False
 
-    # Check
-    for name, param in mask_unet.named_parameters():
-        if name.startswith("down_blocks"):
-            assert not param.requires_grad, f"Layer {name} was not frozen."
+    # # Check
+    # for name, param in mask_unet.named_parameters():
+    #     if name.startswith("down_blocks"):
+    #         assert not param.requires_grad, f"Layer {name} was not frozen."
 
     # create hooks for saving and loading model
     def save_model_hook(models, weights, output_dir):
@@ -210,9 +209,8 @@ def main(
         eps=train_args.adam_epsilon,
     )
 
-    mask_unet_trainable_params = filter(lambda param: param.requires_grad, mask_unet.parameters())
     mask_optimizer = torch.optim.AdamW(
-        mask_unet_trainable_params,
+        mask_unet.parameters(),
         lr=train_args.mask_learning_rate,
         betas=(train_args.adam_beta1, train_args.adam_beta2),
         weight_decay=train_args.adam_weight_decay,
@@ -330,9 +328,6 @@ def main(
                 timesteps_source_noisy = torch.full((bsz,), timesteps_source_noisy, device=latents.device)
                 timesteps_source_noisy = timesteps_source_noisy.long()
 
-                mid_timesteps = torch.full((bsz,), noise_scheduler.config.num_train_timesteps // 2)
-                mid_timesteps = mid_timesteps.long()
-
                 x_noisy = noise_scheduler.add_noise(latents, noise, timesteps)  # noisy latents
                 encoder_hidden_states = text_encoder(batch["prompts"])[0]
 
@@ -387,6 +382,7 @@ def main(
 
                     avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
                     train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
+
                 elif train_args.train_epsilon:
                     loss = F.mse_loss(model_pred, target.float(), reduction="mean")
 
@@ -503,35 +499,34 @@ def main(
                         val_images["edited_image_mask_all_timestep"].append(edited_image)
                         val_images["masks_all_timestep"].append(masks)
 
-                    # TODO remove last method
-                    # if config.inference.method == "both" or config.inference.method == "last":
-                    #     result = pipeline(
-                    #         prompt=validation_prompt,
-                    #         image=validation_image,
-                    #         num_inference_steps=20,
-                    #         image_guidance_scale=1.5,
-                    #         guidance_scale=7,
-                    #         generator=generator,
-                    #         method="last",
-                    #         hard_mask=config.inference.hard_mask,
-                    #     )
-                    #     edited_image = wandb.Image(result.images[0], caption=validation_prompt)
-                    #     mask = wandb.Image(result.masks[0], caption=validation_prompt)
-                    #     val_images["edited_image_mask_last_timestep"].append(edited_image)
-                    #     val_images["masks_last_timestep"].append(mask)
+                    if config.inference.method == "both" or config.inference.method == "last":
+                        result = pipeline(
+                            prompt=validation_prompt,
+                            image=validation_image,
+                            num_inference_steps=20,
+                            image_guidance_scale=1.5,
+                            guidance_scale=7,
+                            generator=generator,
+                            method="last",
+                            hard_mask=config.inference.hard_mask,
+                        )
+                        edited_image = wandb.Image(result.images[0], caption=validation_prompt)
+                        mask = wandb.Image(result.masks[0], caption=validation_prompt)
+                        val_images["edited_image_mask_last_timestep"].append(edited_image)
+                        val_images["masks_last_timestep"].append(mask)
 
-                    # result = pipeline(
-                    #     prompt=validation_prompt,
-                    #     image=validation_image,
-                    #     num_inference_steps=20,
-                    #     image_guidance_scale=1.5,
-                    #     guidance_scale=7,
-                    #     generator=generator,
-                    #     method="none",
-                    #     hard_mask=config.inference.hard_mask,
-                    # )
-                    # edited_image = wandb.Image(result.images[0], caption=validation_prompt)
-                    # val_images["edited_image_without_mask"].append(edited_image)
+                    result = pipeline(
+                        prompt=validation_prompt,
+                        image=validation_image,
+                        num_inference_steps=20,
+                        image_guidance_scale=1.5,
+                        guidance_scale=7,
+                        generator=generator,
+                        method="none",
+                        hard_mask=config.inference.hard_mask,
+                    )
+                    edited_image = wandb.Image(result.images[0], caption=validation_prompt)
+                    val_images["edited_image_without_mask"].append(edited_image)
 
             for tracker in accelerator.trackers:
                 if tracker.name == "wandb":

@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.loaders import UNet2DConditionLoadersMixin
+from diffusers.loaders import UNet2DConditionLoadersMixin, PeftAdapterMixin
 from diffusers.utils import USE_PEFT_BACKEND, BaseOutput, deprecate, logging, scale_lora_layers, unscale_lora_layers
 from diffusers.models.activations import get_activation
 from diffusers.models.attention_processor import (
@@ -23,7 +23,7 @@ from diffusers.models.embeddings import (
     ImageHintTimeEmbedding,
     ImageProjection,
     ImageTimeEmbedding,
-    PositionNet,
+    GLIGENTextBoundingboxProjection,
     TextImageProjection,
     TextImageTimeEmbedding,
     TextTimeEmbedding,
@@ -56,7 +56,7 @@ class MaskModelOutput(BaseOutput):
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-class MaskUNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
+class MaskUNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, PeftAdapterMixin):
     r"""
     A conditional 2D UNet model that takes a noisy sample, conditional state, and a timestep and returns a sample
     shaped output. Modified with an activation function (mask) applied to the final sample.
@@ -604,7 +604,7 @@ class MaskUNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 positive_len = cross_attention_dim[0]
 
             feature_type = "text-only" if attention_type == "gated" else "text-image"
-            self.position_net = PositionNet(
+            self.position_net = GLIGENTextBoundingboxProjection(
                 positive_len=positive_len, out_dim=cross_attention_dim, feature_type=feature_type
             )
 

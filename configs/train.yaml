@@ -3,6 +3,7 @@ model:
   model_path: timbrooks/instruct-pix2pix
   mask:
     act_fn: sigmoid
+  rank: 4 # lora rank
 
 data:
   path: osunlp/MagicBrush
@@ -35,11 +36,10 @@ train:
 
   seed: 0
   # resume_from_checkpoint: GD/checkpoints/checkpoint-2
-  resume_from_checkpoint:
+  resume_from_checkpoint: /data/andy/checkpoint-1794
 
   # joint_training: True - training eps unet + mask unet
   # joint_training: False - freeze eps unet
-  joint_training: False
   train_mask: True
   train_epsilon: False
 

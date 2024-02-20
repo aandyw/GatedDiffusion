@@ -343,11 +343,11 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         masks = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             # generate source_noisy at time T//2
-            mid_timestep = timesteps[self._num_timesteps//2]
+            mid_timestep = timesteps[self._num_timesteps // 2]
             mid_timestep = torch.full((latents.shape[0],), mid_timestep, device=latents.device)
             noise = torch.randn_like(latents)
             source_noisy = self.scheduler.add_noise(source_encoded, noise, mid_timestep)
-            mask = self.mask_unet(source_noisy, mid_timestep, encoder_hidden_states=mask_prompt_embeds).mask
+            mask = self.mask_unet(source_encoded, timesteps[-1], encoder_hidden_states=mask_prompt_embeds).mask
             if hard_mask:
                 hard_mask_threshold = 0.5
                 mask = torch.where(mask > hard_mask_threshold, 1.0, 0.0)
@@ -397,12 +397,12 @@ class GatedDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
 
                 # apply last mask
                 if method == "all":
-                    #source_noisy = inverse_image_latents[i].unsqueeze(0)
-                    #mask = self.mask_unet(source_noisy_all, mid_timestep, encoder_hidden_states=mask_prompt_embeds).mask
+                    # source_noisy = inverse_image_latents[i].unsqueeze(0)
+                    # mask = self.mask_unet(source_noisy_all, mid_timestep, encoder_hidden_states=mask_prompt_embeds).mask
 
                     source_noisy_t = inverse_image_latents[i]
                     latents = mask * latents + (1.0 - mask) * source_noisy_t
-                    #masks.append(mask)
+                    # masks.append(mask)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_hat, t, latents, **extra_step_kwargs, return_dict=False)[0]

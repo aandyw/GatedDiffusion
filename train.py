@@ -464,7 +464,7 @@ def main(
                         save_path = os.path.join(os.path.join(logging_dir, "checkpoints"), f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
 
-                        unwrapped_mask_unet = unwrap_model(unet)
+                        unwrapped_mask_unet = unwrap_model(mask_unet)
                         mask_unet_lora_state_dict = convert_state_dict_to_diffusers(
                             get_peft_model_state_dict(unwrapped_mask_unet)
                         )

@@ -21,14 +21,14 @@ from diffusers import StableDiffusionDiffEditPipeline, StableDiffusionPipeline
 from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, DDIMInverseScheduler
 from diffusers.models import UNet2DConditionModel
 from diffusers.optimization import get_scheduler
-from diffusers.training_utils import cast_training_params
-from diffusers.utils.torch_utils import is_compiled_module
-from diffusers.utils import convert_state_dict_to_diffusers
+# from diffusers.training_utils import cast_training_params
+# from diffusers.utils.torch_utils import is_compiled_module
+# from diffusers.utils import convert_state_dict_to_diffusers
 
 from transformers import CLIPTextModel
 
-from peft import LoraConfig
-from peft.utils import get_peft_model_state_dict
+# from peft import LoraConfig
+# from peft.utils import get_peft_model_state_dict
 
 from data.dataset import MagicBrushDataset
 from models.mask_unet_model import MaskUNetModel
@@ -95,10 +95,10 @@ def main(
     if train_args.seed is not None:
         set_seed(train_args.seed)
 
-    def unwrap_model(model):
-        model = accelerator.unwrap_model(model)
-        model = model._orig_mod if is_compiled_module(model) else model
-        return model
+    # def unwrap_model(model):
+    #     model = accelerator.unwrap_model(model)
+    #     model = model._orig_mod if is_compiled_module(model) else model
+    #     return model
 
     def collate_fn(batch):
         source_pixel_values = torch.stack([sample["source"] for sample in batch])
@@ -159,15 +159,15 @@ def main(
     if not train_args.train_epsilon:
         unet.requires_grad_(False)
 
-        for param in mask_unet.parameters():
-            param.requires_grad_(False)
+        # for param in mask_unet.parameters():
+        #     param.requires_grad_(False)
 
-        mask_unet_lora_config = LoraConfig(
-            r=model_args.rank,
-            lora_alpha=model_args.rank,
-            init_lora_weights="gaussian",
-            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
-        )
+        # mask_unet_lora_config = LoraConfig(
+        #     r=model_args.rank,
+        #     lora_alpha=model_args.rank,
+        #     init_lora_weights="gaussian",
+        #     target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        # )
 
     if train_args.gradient_checkpointing:
         if train_args.train_epsilon:
@@ -175,7 +175,7 @@ def main(
         if train_args.train_epsilon:
             mask_unet.enable_gradient_checkpointing()
 
-    mask_unet.add_adapter(mask_unet_lora_config)
+    # mask_unet.add_adapter(mask_unet_lora_config)
 
     # create hooks for saving and loading model
     def save_model_hook(models, weights, output_dir):
@@ -214,11 +214,11 @@ def main(
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    if accelerator.mixed_precision == "fp16":
-        # only upcast trainable parameters (LoRA) into fp32
-        cast_training_params(mask_unet, dtype=torch.float32)
+    # if accelerator.mixed_precision == "fp16":
+    #     # only upcast trainable parameters (LoRA) into fp32
+    #     cast_training_params(mask_unet, dtype=torch.float32)
 
-    lora_layers = filter(lambda p: p.requires_grad, mask_unet.parameters())
+    # lora_layers = filter(lambda p: p.requires_grad, mask_unet.parameters())
 
     unet_optimizer = torch.optim.AdamW(
         unet.parameters(),
@@ -229,7 +229,8 @@ def main(
     )
 
     mask_optimizer = torch.optim.AdamW(
-        lora_layers,
+        mask_unet.parameters(),
+        # lora_layers,
         lr=train_args.mask_learning_rate,
         betas=(train_args.adam_beta1, train_args.adam_beta2),
         weight_decay=train_args.adam_weight_decay,
@@ -351,7 +352,7 @@ def main(
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
-                timesteps_source_noisy = math.floor(noise_scheduler.config.num_train_timesteps / 2)
+                timesteps_source_noisy = math.floor(noise_scheduler.config.num_train_timesteps / 4)
                 timesteps_source_noisy = torch.full((bsz,), timesteps_source_noisy, device=latents.device)
                 timesteps_source_noisy = timesteps_source_noisy.long()
 
@@ -388,6 +389,8 @@ def main(
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
+                timesteps_last = torch.full((bsz,), 0, device=latents.device)
+                timesteps_last = timesteps_last.long()
                 mask = mask_unet(source_noisy, timesteps_source_noisy, encoder_hidden_states).mask
 
                 model_pred = unet(concatenated_noisy_latents, timesteps, encoder_hidden_states).sample
@@ -397,14 +400,16 @@ def main(
 
                 if train_args.train_mask:
                     criterion = nn.BCELoss()
-                    loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
-                    loss = criterion(mask, ground_truth_mask.float()) + loss_ip2p
+                    # loss_ip2p = F.mse_loss(model_pred, target.float(), reduction="mean")
+                    loss = criterion(mask, ground_truth_mask.float())
 
-                    avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
-                    train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
+                    # avg_loss_ip2p = accelerator.gather(loss_ip2p.repeat(train_args.batch_size)).mean()
+                    # train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
 
                 elif train_args.train_epsilon:
                     loss = F.mse_loss(model_pred, target.float(), reduction="mean")
+                    avg_loss_ip2p = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
+                    train_loss_ip2p = avg_loss_ip2p.item() / train_args.gradient_accumulation_steps
 
                 avg_loss = accelerator.gather(loss.repeat(train_args.batch_size)).mean()
                 train_loss += avg_loss.item() / train_args.gradient_accumulation_steps
@@ -413,7 +418,7 @@ def main(
                 if accelerator.sync_gradients:
                     params = []
                     if train_args.train_mask:
-                        params += list(lora_layers)
+                        params += list(mask_unet.parameters())
                     if train_args.train_epsilon:
                         params += list(unet.parameters())
                     accelerator.clip_grad_norm_(params, train_args.max_grad_norm)
@@ -464,16 +469,16 @@ def main(
                         save_path = os.path.join(os.path.join(logging_dir, "checkpoints"), f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
 
-                        unwrapped_mask_unet = unwrap_model(mask_unet)
-                        mask_unet_lora_state_dict = convert_state_dict_to_diffusers(
-                            get_peft_model_state_dict(unwrapped_mask_unet)
-                        )
+                        # unwrapped_mask_unet = unwrap_model(mask_unet)
+                        # mask_unet_lora_state_dict = convert_state_dict_to_diffusers(
+                        #     get_peft_model_state_dict(unwrapped_mask_unet)
+                        # )
 
-                        StableDiffusionPipeline.save_lora_weights(
-                            save_directory=save_path,
-                            unet_lora_layers=mask_unet_lora_state_dict,
-                            safe_serialization=True,
-                        )
+                        # StableDiffusionPipeline.save_lora_weights(
+                        #     save_directory=save_path,
+                        #     unet_lora_layers=mask_unet_lora_state_dict,
+                        #     safe_serialization=True,
+                        # )
 
                         logger.info(f"Saved state to {save_path}")
 
@@ -567,13 +572,13 @@ def main(
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
 
-        unwrapped_mask_unet = unwrap_model(mask_unet)
-        mask_unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unwrapped_mask_unet))
-        StableDiffusionPipeline.save_lora_weights(
-            save_directory=logging_dir,
-            unet_lora_layers=mask_unet_lora_state_dict,
-            safe_serialization=True,
-        )
+        # unwrapped_mask_unet = unwrap_model(mask_unet)
+        # mask_unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unwrapped_mask_unet))
+        # StableDiffusionPipeline.save_lora_weights(
+        #     save_directory=logging_dir,
+        #     unet_lora_layers=mask_unet_lora_state_dict,
+        #     safe_serialization=True,
+        # )
 
         pipeline = GatedDiffusionPipeline.from_pretrained(
             model_args.model_path,
@@ -585,7 +590,7 @@ def main(
             safety_checker=None,
             torch_dtype=weight_dtype,
         )
-        pipeline.load_lora_weights(logging_dir)
+        # pipeline.load_lora_weights(logging_dir)
         pipeline.save_pretrained(os.path.join(logging_dir, "models"))
 
     accelerator.end_training()
